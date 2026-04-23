@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-smoke-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Evaluate flake
+        run: nix flake show --no-write-lock-file .
+
+      - name: Build package
+        run: nix build .
+
+      - name: Print version
+        run: ./result/bin/omp --version
+
+      - name: Smoke test grep command
+        run: ./result/bin/omp grep oh-my-pi .

@@ -56,7 +56,24 @@ Or run it directly:
 nix run github:bjin/oh-my-pi-nix#default -- --version
 ```
 
-## Update notes
+## Updating to a newer upstream tag
 
-This flake is pinned with `flake.lock`, and the packaged `oh-my-pi` version is declared in `flake.nix`.
-If upstream releases a newer version, update the version and source hash in `flake.nix`, then refresh any build hashes as needed.
+Use the local updater to move this flake to the newest upstream `v*.*.*` tag:
+
+```bash
+python3 scripts/update.py
+```
+
+`scripts/update.py` will:
+
+- query the newest upstream tag with `git ls-remote`
+- fetch the upstream source tarball into the repo-local temporary directory ignored by `.gitignore` (`.tmp/`)
+- read the upstream Rust toolchain channel from `rust-toolchain.toml`
+- update `flake.nix` via `scripts/update_flake.py` and refresh `flake.lock` for `rust-overlay`
+- let repeated `nix build .` runs discover the Bun and Cargo fixed-output hashes
+- run `nix build .`
+- verify `./result/bin/omp --version`
+- verify `./result/bin/omp grep oh-my-pi .` exits successfully
+- stage and commit the flake update locally
+
+It does not push to GitHub. Review the commit, then push it yourself when ready.

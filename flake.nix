@@ -25,7 +25,7 @@
 
       pname = "oh-my-pi";
       version = "14.1.4";
-      rustToolchainDate = "2026-03-27";
+      rustToolchainChannel = "nightly-2026-03-27";
       rustTarget = "x86_64-unknown-linux-gnu";
 
       src = pkgs.fetchurl {
@@ -33,13 +33,31 @@
         hash = "sha256-vbo7FPbP6GyD10Zqsm0hTxpWIxE1jGYkK5TMz6GT1Iw=";
       };
 
-      nightlyToolchain = pkgs.rust-bin.nightly."${rustToolchainDate}".minimal.override {
-        targets = [ rustTarget ];
-      };
+      toolchainWithTarget =
+        let
+          nightlyDateMatch = builtins.match "nightly-(.+)" rustToolchainChannel;
+          stableVersionMatch = builtins.match "[0-9]+\\.[0-9]+\\.[0-9]+" rustToolchainChannel;
+          baseToolchain =
+            if nightlyDateMatch != null then
+              pkgs.rust-bin.nightly."${builtins.head nightlyDateMatch}".minimal
+            else if rustToolchainChannel == "nightly" then
+              pkgs.rust-bin.selectLatestNightlyWith (toolchain: toolchain.minimal)
+            else if rustToolchainChannel == "stable" then
+              pkgs.rust-bin.stable.latest.minimal
+            else if rustToolchainChannel == "beta" then
+              pkgs.rust-bin.beta.latest.minimal
+            else if stableVersionMatch != null then
+              pkgs.rust-bin.stable."${rustToolchainChannel}".minimal
+            else
+              throw "Unsupported rustToolchainChannel: ${rustToolchainChannel}";
+        in
+        baseToolchain.override {
+          targets = [ rustTarget ];
+        };
 
       rustPlatform = pkgs.makeRustPlatform {
-        cargo = nightlyToolchain;
-        rustc = nightlyToolchain;
+        cargo = toolchainWithTarget;
+        rustc = toolchainWithTarget;
       };
 
       bunDeps = pkgs.stdenvNoCC.mkDerivation {
@@ -97,7 +115,7 @@
         nativeBuildInputs = [
           pkgs.bun
           pkgs.zig
-          nightlyToolchain
+          toolchainWithTarget
           rustPlatform.cargoSetupHook
         ];
 
@@ -149,7 +167,7 @@
         '';
 
         passthru = {
-          inherit bunDeps cargoDeps nightlyToolchain;
+          inherit bunDeps cargoDeps toolchainWithTarget;
         };
 
         meta = {
@@ -162,6 +180,8 @@
       };
     in
     {
+      formatter.${system} = pkgs.nixfmt-rfc-style;
+
       packages.${system}.default = package;
 
       apps.${system}.default = {
