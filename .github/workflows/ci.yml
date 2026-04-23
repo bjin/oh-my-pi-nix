@@ -19,6 +19,13 @@ jobs:
       - name: Install Nix
         uses: cachix/install-nix-action@v31
 
+      - name: Configure Cachix
+        if: vars.CACHIX_CACHE_NAME != ''
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ vars.CACHIX_CACHE_NAME }}
+          skipPush: true
+
       - name: Evaluate flake
         run: nix flake show --no-write-lock-file .
 
@@ -30,3 +37,17 @@ jobs:
 
       - name: Smoke test grep command
         run: ./result/bin/omp grep oh-my-pi .
+
+      - name: Upload package to Cachix
+        if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CACHIX_CACHE_NAME != ''
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+        run: |
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "CACHIX_AUTH_TOKEN is not configured; skipping Cachix upload."
+            exit 0
+          fi
+
+          cachix authtoken "$CACHIX_AUTH_TOKEN"
+          readlink -f result | cachix push "$CACHIX_CACHE_NAME"
