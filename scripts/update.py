@@ -201,7 +201,7 @@ def main() -> int:
             bun_hash=FAKE_HASH,
             cargo_hash=FAKE_HASH,
         )
-        run("nix", "flake", "lock", "--update-input", "rust-overlay", capture=False)
+        run("nix", "flake", "update", "rust-overlay", capture=False)
 
         cargo_hash, bun_hash = resolve_fixed_output_hashes(
             version=latest_version,

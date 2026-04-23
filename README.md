@@ -77,3 +77,27 @@ python3 scripts/update.py
 - stage and commit the flake update locally
 
 It does not push to GitHub. Review the commit, then push it yourself when ready.
+
+## Refreshing locked flake inputs
+
+To update the locked `nixpkgs` and `rust-overlay` revisions manually, run:
+
+```bash
+nix flake update nixpkgs rust-overlay
+```
+
+`nix flake lock` only refreshes missing lock entries. To update existing locked inputs, use `nix flake update`.
+
+If you want the repository helper to do that update and verify it still builds, run:
+
+```bash
+python3 scripts/update-deps.py
+```
+
+`scripts/update-deps.py` will:
+
+- update the locked `nixpkgs` and `rust-overlay` revisions in `flake.lock`
+- run `nix build .` to verify the refreshed lock file still builds
+- stage `flake.lock` and commit the lock refresh locally
+
+It does not push to GitHub. Review the commit, then push it yourself when ready.
