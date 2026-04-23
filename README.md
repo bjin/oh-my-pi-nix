@@ -12,13 +12,15 @@ Current properties of this flake:
 - uses the pinned nightly Rust toolchain required by upstream (`nightly-2026-03-27`)
 - builds the native addons from source
 - builds the compiled `omp` CLI from source with Bun
-- currently targets `x86_64-linux`
+- currently supports `x86_64-linux` only
 
 The package output installs:
 
 - `omp`
 - `pi_natives.linux-x64-baseline.node`
 - `pi_natives.linux-x64-modern.node`
+
+This flake currently supports `x86_64-linux` only. Patches and pull requests to extend it to additional platforms are welcome.
 
 ## Build locally
 
@@ -36,10 +38,17 @@ Run the built binary without installing it:
 
 ## Install with `nix`
 
-Install directly from this GitHub repository into your user profile:
+Install from the public Cachix binary cache to avoid a local build when a matching package is available:
 
 ```bash
-nix profile install github:bjin/oh-my-pi-nix#default
+nix shell nixpkgs#cachix -c cachix use oh-my-pi
+nix profile add github:bjin/oh-my-pi-nix#oh-my-pi
+```
+
+You can also install directly from the GitHub flake into your user profile:
+
+```bash
+nix profile add github:bjin/oh-my-pi-nix#oh-my-pi
 ```
 
 After installation, `omp` will be available from your profile.
@@ -47,13 +56,13 @@ After installation, `omp` will be available from your profile.
 You can also build directly from GitHub without cloning the repo first:
 
 ```bash
-nix build github:bjin/oh-my-pi-nix#default
+nix build github:bjin/oh-my-pi-nix#oh-my-pi
 ```
 
 Or run it directly:
 
 ```bash
-nix run github:bjin/oh-my-pi-nix#default -- --version
+nix run github:bjin/oh-my-pi-nix#oh-my-pi -- --version
 ```
 
 ## Updating to a newer upstream tag

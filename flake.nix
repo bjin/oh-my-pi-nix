@@ -182,7 +182,10 @@
     {
       formatter.${system} = pkgs.nixfmt-rfc-style;
 
-      packages.${system}.default = package;
+      packages.${system} = {
+        default = package;
+        "oh-my-pi" = package;
+      };
 
       apps.${system}.default = {
         type = "app";
