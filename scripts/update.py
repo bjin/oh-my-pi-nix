@@ -106,7 +106,7 @@ def compute_src_hash(tarball_path: Path) -> str:
 def update_flake(version: str, rust_toolchain_channel: str, src_hash: str, bun_hash: str, cargo_hash: str) -> None:
     run(
         sys.executable,
-        str(SCRIPT_DIR / "update_flake.py"),
+        str(SCRIPT_DIR / "update-flake.py"),
         "--version",
         version,
         "--rust-toolchain-channel",
