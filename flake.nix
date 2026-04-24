@@ -24,13 +24,13 @@
       lib = pkgs.lib;
 
       pname = "oh-my-pi";
-      version = "14.2.0";
+      version = "14.2.1";
       rustToolchainChannel = "nightly-2026-03-27";
       rustTarget = "x86_64-unknown-linux-gnu";
 
       src = pkgs.fetchurl {
         url = "https://github.com/can1357/oh-my-pi/archive/refs/tags/v${version}.tar.gz";
-        hash = "sha256-08FT8oND0yRPOS9VdCA6ROIKd0EI8jd3hJJDOk9oFgE=";
+        hash = "sha256-7Q/C5tp5AqdGyjYQKgm3ijGzpPagwvBfXjGZ8YjfPZU=";
       };
 
       toolchainWithTarget =
@@ -94,13 +94,13 @@
         '';
 
         outputHashMode = "recursive";
-        outputHash = "sha256-2mcs1yu5gFnVWyDT/dF9o9W9GTW65egK0q67HbzpkDU=";
+        outputHash = "sha256-rwu8YCIMhkpPHnRgCiBvIIVtc2MJLkqy2qF3SKmHOdE=";
       };
 
       cargoDeps = rustPlatform.fetchCargoVendor {
         inherit src;
         sourceRoot = "${pname}-${version}";
-        hash = "sha256-rNSWK9E11gN+rdXbIwR/au/K4FGYvKcHOtf0dym0LcU=";
+        hash = "sha256-kwJj+eCHuFs5v5qXUtMFmfJjk8r80mWFLdemXZYYavc=";
       };
 
       package = pkgs.stdenv.mkDerivation {
