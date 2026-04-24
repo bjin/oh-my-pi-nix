@@ -15,6 +15,7 @@ ROOT = SCRIPT_DIR.parent
 TMP_ROOT = ROOT / ".tmp"
 UPSTREAM_REPO_URL = "https://github.com/can1357/oh-my-pi.git"
 UPSTREAM_TAG_GLOB = "v*.*.*"
+INPUTS_TO_UPDATE = ("nixpkgs", "rust-overlay")
 FAKE_HASH = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 
 
@@ -25,20 +26,35 @@ def run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None, 
         env=env,
         check=True,
         text=True,
-        capture_output=capture,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else subprocess.STDOUT,
     )
-    return result.stdout.strip() if capture else ""
+    return result.stdout.strip() if capture and result.stdout is not None else ""
 
 
-def run_result(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+def run_and_capture_output(
+    *args: str,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+ ) -> tuple[int, str]:
+    process = subprocess.Popen(
         list(args),
         cwd=cwd or ROOT,
         env=env,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         text=True,
-        capture_output=True,
     )
+    output_parts: list[str] = []
+    if process.stdout is None:
+        raise SystemExit(f"failed to capture output for command: {' '.join(args)}")
+
+    for chunk in process.stdout:
+        sys.stdout.write(chunk)
+        sys.stdout.flush()
+        output_parts.append(chunk)
+
+    return process.wait(), "".join(output_parts)
 
 
 def require_clean_git_tree() -> None:
@@ -84,7 +100,10 @@ def download_tarball(tag: str, workdir: Path) -> Path:
 
 def extract_tarball(tarball_path: Path, workdir: Path) -> Path:
     with tarfile.open(tarball_path, "r:gz") as archive:
-        archive.extractall(workdir)
+        extract_kwargs = {"path": workdir}
+        if hasattr(tarfile, "data_filter"):
+            extract_kwargs["filter"] = "data"
+        archive.extractall(**extract_kwargs)
     candidates = [path for path in workdir.iterdir() if path.is_dir() and path.name.startswith("oh-my-pi-")]
     if len(candidates) != 1:
         raise SystemExit("could not determine extracted source directory")
@@ -121,12 +140,40 @@ def update_flake(version: str, rust_toolchain_channel: str, src_hash: str, bun_h
     )
 
 
-def extract_fixed_hash(build_output: str) -> str:
-    matches = re.findall(r'got:\s+(sha256-[A-Za-z0-9+/=]+)', build_output)
+def extract_fixed_output_hashes(version: str, build_output: str) -> tuple[str | None, str | None]:
+    matches = list(
+        re.finditer(
+            r"hash mismatch in fixed-output derivation '([^']+)':\n\s*specified:\s*(sha256-[A-Za-z0-9+/=]+)\n\s*got:\s*(sha256-[A-Za-z0-9+/=]+)",
+            build_output,
+        )
+    )
     if not matches:
         raise SystemExit(f"could not extract fixed-output hash from nix output:\n\n{build_output}")
-    return matches[-1]
 
+    cargo_hash: str | None = None
+    bun_hash: str | None = None
+    bun_drv_name = f"oh-my-pi-{version}-bun-deps.drv"
+    unexpected_derivations: list[str] = []
+    for match in matches:
+        drv_name = Path(match.group(1)).name
+        drv_label = drv_name.split("-", 1)[1] if "-" in drv_name else drv_name
+        got_hash = match.group(3)
+        if drv_label == "cargo-deps-vendor-staging.drv":
+            cargo_hash = got_hash
+            continue
+        if drv_label == bun_drv_name:
+            bun_hash = got_hash
+            continue
+        unexpected_derivations.append(drv_name)
+
+    if unexpected_derivations:
+        raise SystemExit(
+            "encountered unexpected fixed-output derivation mismatch(es): "
+            + ", ".join(unexpected_derivations)
+            + f"\n\n{build_output}"
+        )
+
+    return cargo_hash, bun_hash
 
 def resolve_fixed_output_hashes(version: str, rust_toolchain_channel: str, src_hash: str) -> tuple[str, str]:
     cargo_hash = FAKE_HASH
@@ -141,18 +188,19 @@ def resolve_fixed_output_hashes(version: str, rust_toolchain_channel: str, src_h
             cargo_hash=cargo_hash,
         )
 
-        result = run_result("nix", "build", ".")
-        if result.returncode == 0:
+        returncode, output = run_and_capture_output("nix", "build", ".")
+        if returncode == 0:
             return cargo_hash, bun_hash
 
-        output = result.stdout + result.stderr
-        fixed_hash = extract_fixed_hash(output)
-
-        if "cargo-deps-vendor-staging.drv" in output:
-            cargo_hash = fixed_hash
-            continue
-        if f"oh-my-pi-{version}-bun-deps.drv" in output:
-            bun_hash = fixed_hash
+        next_cargo_hash, next_bun_hash = extract_fixed_output_hashes(version, output)
+        updated = False
+        if next_cargo_hash is not None and next_cargo_hash != cargo_hash:
+            cargo_hash = next_cargo_hash
+            updated = True
+        if next_bun_hash is not None and next_bun_hash != bun_hash:
+            bun_hash = next_bun_hash
+            updated = True
+        if updated:
             continue
 
         raise SystemExit(f"nix build failed for an unexpected reason:\n\n{output}")
@@ -161,7 +209,7 @@ def resolve_fixed_output_hashes(version: str, rust_toolchain_channel: str, src_h
 
 
 def verify_build() -> None:
-    run("nix", "fmt", capture=False)
+    run("nix", "fmt", "flake.nix", capture=False)
     run("nix", "build", ".", capture=False)
     run("./result/bin/omp", "--version", capture=False)
     run("./result/bin/omp", "grep", "oh-my-pi", ".", capture=False)
@@ -201,7 +249,7 @@ def main() -> int:
             bun_hash=FAKE_HASH,
             cargo_hash=FAKE_HASH,
         )
-        run("nix", "flake", "update", "rust-overlay", capture=False)
+        run("nix", "flake", "update", *INPUTS_TO_UPDATE, capture=False)
 
         cargo_hash, bun_hash = resolve_fixed_output_hashes(
             version=latest_version,
