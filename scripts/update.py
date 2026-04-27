@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
 TMP_ROOT = ROOT / ".tmp"
+HASHES = ROOT / "hashes.json"
 UPSTREAM_REPO_URL = "https://github.com/can1357/oh-my-pi.git"
 UPSTREAM_TAG_GLOB = "v*.*.*"
 INPUTS_TO_UPDATE = ("nixpkgs", "rust-overlay")
@@ -82,11 +84,11 @@ def get_latest_tag() -> str:
 
 
 def get_current_version() -> str:
-    flake_text = (ROOT / "flake.nix").read_text()
-    match = re.search(r'^\s*version = "([^"]+)";$', flake_text, re.MULTILINE)
-    if match is None:
-        raise SystemExit("could not parse current version from flake.nix")
-    return match.group(1)
+    data = json.loads(HASHES.read_text())
+    version = data.get("version")
+    if not isinstance(version, str) or not version:
+        raise SystemExit("could not parse current version from hashes.json")
+    return version
 
 
 def download_tarball(tag: str, workdir: Path) -> Path:
@@ -216,7 +218,7 @@ def verify_build() -> None:
 
 
 def stage_and_commit(tag: str) -> None:
-    run("git", "add", "flake.nix", "flake.lock", capture=False)
+    run("git", "add", "flake.nix", "flake.lock", "hashes.json", capture=False)
     run("git", "commit", "-m", f"Update oh-my-pi to {tag}", capture=False)
 
 

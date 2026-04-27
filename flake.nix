@@ -24,13 +24,18 @@
       lib = pkgs.lib;
 
       pname = "oh-my-pi";
-      version = "14.5.3";
+      versionData = builtins.fromJSON (builtins.readFile ./hashes.json);
+      version = versionData.version;
       rustToolchainChannel = "nightly-2026-03-27";
       rustTarget = "x86_64-unknown-linux-gnu";
+      runtimeLibraryPath = lib.makeLibraryPath [
+        pkgs.stdenv.cc.cc.lib
+        pkgs.zlib
+      ];
 
       src = pkgs.fetchurl {
         url = "https://github.com/can1357/oh-my-pi/archive/refs/tags/v${version}.tar.gz";
-        hash = "sha256-w3Vu30aaJ6gX4v92k9tv8wmhe282hH8tq3e/GOJPt8g=";
+        hash = versionData.srcHash;
       };
 
       toolchainWithTarget =
@@ -94,13 +99,13 @@
         '';
 
         outputHashMode = "recursive";
-        outputHash = "sha256-69ThlB4+WMEKldS2uGCBwnPvA1ko+6edO8r1hV5wpWw=";
+        outputHash = versionData.bunHash;
       };
 
       cargoDeps = rustPlatform.fetchCargoVendor {
         inherit src;
         sourceRoot = "${pname}-${version}";
-        hash = "sha256-k4PdxBt21KOrkNXdlE0JT4Rj4SrJIHqhFcVdsbeCj9k=";
+        hash = versionData.cargoHash;
       };
 
       package = pkgs.stdenv.mkDerivation {
@@ -113,12 +118,19 @@
         sourceRoot = "${pname}-${version}";
 
         nativeBuildInputs = [
+          pkgs.autoPatchelfHook
           pkgs.bun
+          pkgs.makeWrapper
+          pkgs.pkg-config
           pkgs.zig
           toolchainWithTarget
           rustPlatform.cargoSetupHook
         ];
 
+        buildInputs = [
+          pkgs.stdenv.cc.cc.lib
+          pkgs.zlib
+        ];
         strictDeps = true;
         dontStrip = true;
 
@@ -130,6 +142,8 @@
           export BUN_INSTALL_CACHE_DIR="$TMPDIR/bun-install-cache"
           export CARGO_HOME="$TMPDIR/cargo-home"
           mkdir -p "$HOME" "$XDG_CACHE_HOME" "$BUN_INSTALL_CACHE_DIR" "$CARGO_HOME"
+          export LD_LIBRARY_PATH="${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]}"
+          export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
 
           cp -a ${bunDeps}/node_modules ./node_modules
           chmod -R u+w ./node_modules
@@ -156,11 +170,14 @@
         installPhase = ''
           runHook preInstall
 
-          install -Dm755 packages/coding-agent/dist/omp "$out/bin/omp"
+          install -Dm755 packages/coding-agent/dist/omp "$out/lib/omp/omp"
           install -Dm755 packages/natives/native/pi_natives.linux-x64-baseline.node \
-            "$out/bin/pi_natives.linux-x64-baseline.node"
+            "$out/lib/omp/pi_natives.linux-x64-baseline.node"
           install -Dm755 packages/natives/native/pi_natives.linux-x64-modern.node \
-            "$out/bin/pi_natives.linux-x64-modern.node"
+            "$out/lib/omp/pi_natives.linux-x64-modern.node"
+          makeWrapper "$out/lib/omp/omp" "$out/bin/omp" \
+            --set PI_SKIP_VERSION_CHECK 1 \
+            --prefix LD_LIBRARY_PATH : "${runtimeLibraryPath}"
           install -Dm644 LICENSE "$out/share/licenses/${pname}/LICENSE"
 
           runHook postInstall
