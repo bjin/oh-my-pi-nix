@@ -26,7 +26,7 @@
       pname = "oh-my-pi";
       versionData = builtins.fromJSON (builtins.readFile ./hashes.json);
       version = versionData.version;
-      rustToolchainChannel = "nightly-2026-03-27";
+      rustToolchainChannel = "nightly-2026-04-29";
       rustTarget = "x86_64-unknown-linux-gnu";
       runtimeLibraryPath = lib.makeLibraryPath [
         pkgs.stdenv.cc.cc.lib
