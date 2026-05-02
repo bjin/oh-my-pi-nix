@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import argparse
 import json
+import os
 import re
 import subprocess
 import sys
@@ -81,6 +83,25 @@ def get_latest_tag() -> str:
     if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
         raise SystemExit(f"unexpected upstream tag format: {tag}")
     return tag
+
+
+def normalize_tag(raw_version: str) -> str:
+    tag = raw_version if raw_version.startswith("v") else f"v{raw_version}"
+    if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
+        raise SystemExit(f"unexpected upstream version format: {raw_version}")
+    return tag
+
+
+def require_upstream_tag(tag: str) -> None:
+    run(
+        "git",
+        "ls-remote",
+        "--exit-code",
+        "--refs",
+        "--tags",
+        UPSTREAM_REPO_URL,
+        tag,
+    )
 
 
 def get_current_version() -> str:
@@ -210,11 +231,39 @@ def resolve_fixed_output_hashes(version: str, rust_toolchain_channel: str, src_h
     raise SystemExit("failed to resolve fixed-output hashes after repeated nix builds")
 
 
+def run_omp_isolated(*args: str) -> None:
+    TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="oh-my-pi-smoke-", dir=TMP_ROOT) as temp_dir:
+        temp_path = Path(temp_dir)
+        home = temp_path / "home"
+        xdg_data_home = temp_path / "xdg-data"
+        home.mkdir()
+        (xdg_data_home / "omp").mkdir(parents=True)
+        run(
+            "./result/bin/omp",
+            *args,
+            env={
+                **os.environ,
+                "HOME": str(home),
+                "XDG_DATA_HOME": str(xdg_data_home),
+            },
+            capture=False,
+        )
+
+
+def verify_no_installed_native_addons() -> None:
+    addon_paths = sorted((ROOT / "result/lib/omp").glob("pi_natives.*.node"))
+    if addon_paths:
+        formatted = "\n".join(f"  {path.relative_to(ROOT)}" for path in addon_paths)
+        raise SystemExit(f"unexpected standalone native addon(s) installed next to omp:\n{formatted}")
+
+
 def verify_build() -> None:
     run("nix", "fmt", "flake.nix", capture=False)
     run("nix", "build", ".", capture=False)
-    run("./result/bin/omp", "--version", capture=False)
-    run("./result/bin/omp", "grep", "oh-my-pi", ".", capture=False)
+    run_omp_isolated("--version")
+    verify_no_installed_native_addons()
+    run_omp_isolated("grep", "oh-my-pi", ".")
 
 
 def stage_and_commit(tag: str) -> None:
@@ -223,9 +272,18 @@ def stage_and_commit(tag: str) -> None:
 
 
 def main() -> int:
+    parser = argparse.ArgumentParser(description="Update this flake to an upstream Oh My Pi release")
+    parser.add_argument(
+        "--version",
+        help="target upstream version, for example 14.5.14 or v14.5.14; defaults to the latest tag",
+    )
+    args = parser.parse_args()
+
     require_clean_git_tree()
     current_version = get_current_version()
-    latest_tag = get_latest_tag()
+    latest_tag = normalize_tag(args.version) if args.version else get_latest_tag()
+    if args.version:
+        require_upstream_tag(latest_tag)
     latest_version = latest_tag.removeprefix("v")
 
     if latest_version == current_version:

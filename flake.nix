@@ -122,7 +122,6 @@
           pkgs.bun
           pkgs.makeWrapper
           pkgs.pkg-config
-          pkgs.zig
           toolchainWithTarget
           rustPlatform.cargoSetupHook
         ];
@@ -140,27 +139,17 @@
           export HOME="$TMPDIR/home"
           export XDG_CACHE_HOME="$TMPDIR/xdg-cache"
           export BUN_INSTALL_CACHE_DIR="$TMPDIR/bun-install-cache"
-          export CARGO_HOME="$TMPDIR/cargo-home"
-          mkdir -p "$HOME" "$XDG_CACHE_HOME" "$BUN_INSTALL_CACHE_DIR" "$CARGO_HOME"
+          export CARGO_TARGET_DIR="$TMPDIR/cargo-target"
+          mkdir -p "$HOME" "$XDG_CACHE_HOME" "$BUN_INSTALL_CACHE_DIR" "$CARGO_TARGET_DIR"
           export LD_LIBRARY_PATH="${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]}"
           export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
 
           cp -a ${bunDeps}/node_modules ./node_modules
           chmod -R u+w ./node_modules
+          substituteInPlace node_modules/@napi-rs/cli/dist/cli.js \
+            --replace-fail '#!/usr/bin/env node' '#!${pkgs.bun}/bin/bun'
 
-          baselineTarget="$TMPDIR/target-baseline"
-          modernTarget="$TMPDIR/target-modern"
-
-          CARGO_TARGET_DIR="$baselineTarget" RUSTFLAGS='-C target-cpu=x86-64-v2' \
-            cargo build --frozen --offline --release --target ${rustTarget} -p pi-natives
-          install -Dm755 "$baselineTarget/${rustTarget}/release/libpi_natives.so" \
-            packages/natives/native/pi_natives.linux-x64-baseline.node
-
-          CARGO_TARGET_DIR="$modernTarget" RUSTFLAGS='-C target-cpu=x86-64-v3' \
-            cargo build --frozen --offline --release --target ${rustTarget} -p pi-natives
-          install -Dm755 "$modernTarget/${rustTarget}/release/libpi_natives.so" \
-            packages/natives/native/pi_natives.linux-x64-modern.node
-
+          CI=1 TARGET_VARIANTS="baseline modern" bun run ci:build:native
           bun --cwd=packages/coding-agent run generate-docs-index
           bun --cwd=packages/coding-agent run build
 
@@ -171,16 +160,30 @@
           runHook preInstall
 
           install -Dm755 packages/coding-agent/dist/omp "$out/lib/omp/omp"
-          install -Dm755 packages/natives/native/pi_natives.linux-x64-baseline.node \
-            "$out/lib/omp/pi_natives.linux-x64-baseline.node"
-          install -Dm755 packages/natives/native/pi_natives.linux-x64-modern.node \
-            "$out/lib/omp/pi_natives.linux-x64-modern.node"
           makeWrapper "$out/lib/omp/omp" "$out/bin/omp" \
             --set PI_SKIP_VERSION_CHECK 1 \
             --prefix LD_LIBRARY_PATH : "${runtimeLibraryPath}"
           install -Dm644 LICENSE "$out/share/licenses/${pname}/LICENSE"
 
           runHook postInstall
+        '';
+
+        doInstallCheck = true;
+        installCheckPhase = ''
+          runHook preInstallCheck
+
+          export HOME="$TMPDIR/check-home"
+          export XDG_DATA_HOME="$TMPDIR/check-xdg-data"
+          mkdir -p "$HOME" "$XDG_DATA_HOME/omp"
+
+          "$out/bin/omp" --version
+
+          if compgen -G "$out/lib/omp/pi_natives.*.node" > /dev/null; then
+            echo "unexpected standalone pi_natives addon installed next to omp"
+            exit 1
+          fi
+
+          runHook postInstallCheck
         '';
 
         passthru = {
