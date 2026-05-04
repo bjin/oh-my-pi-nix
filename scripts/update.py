@@ -21,7 +21,9 @@ UPSTREAM_REPO_URL = "https://github.com/can1357/oh-my-pi.git"
 UPSTREAM_TAG_GLOB = "v*.*.*"
 INPUTS_TO_UPDATE = ("nixpkgs", "rust-overlay")
 FAKE_HASH = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-
+FLAKE = ROOT / "flake.nix"
+RECOVERABLE_CHANGED_PATHS = {"flake.nix", "flake.lock", "hashes.json", "scripts/update.py"}
+HASH_KEYS = ("version", "srcHash", "bunHash", "cargoHash")
 
 def run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None, capture: bool = True) -> str:
     result = subprocess.run(
@@ -61,10 +63,75 @@ def run_and_capture_output(
     return process.wait(), "".join(output_parts)
 
 
-def require_clean_git_tree() -> None:
-    porcelain = run("git", "status", "--porcelain")
-    if porcelain:
+def parse_hashes(raw: str, source: str) -> dict[str, str]:
+    data = json.loads(raw)
+    if not isinstance(data, dict):
+        raise SystemExit(f"{source} is not a JSON object")
+
+    hashes: dict[str, str] = {}
+    for key in HASH_KEYS:
+        value = data.get(key)
+        if not isinstance(value, str) or not value:
+            raise SystemExit(f"could not parse {key} from {source}")
+        hashes[key] = value
+    return hashes
+
+
+def read_hashes() -> dict[str, str]:
+    return parse_hashes(HASHES.read_text(), "hashes.json")
+
+
+def read_head_hashes() -> dict[str, str]:
+    return parse_hashes(run("git", "show", "HEAD:hashes.json"), "HEAD:hashes.json")
+
+
+def git_changed_paths_vs_head() -> set[str]:
+    paths: set[str] = set()
+    for args in (
+        ("git", "diff", "--name-only", "HEAD", "--"),
+        ("git", "diff", "--cached", "--name-only", "HEAD", "--"),
+    ):
+        paths.update(path for path in run(*args).splitlines() if path)
+    return paths
+
+
+def get_recovery_state(hashes: dict[str, str]) -> str | None:
+    changed_paths = git_changed_paths_vs_head()
+    if not changed_paths:
+        if hashes["bunHash"] == FAKE_HASH or hashes["cargoHash"] == FAKE_HASH:
+            raise SystemExit("hashes.json contains a fake dependency hash, but there is no update state to recover")
+        return None
+
+    unexpected_paths = changed_paths - RECOVERABLE_CHANGED_PATHS
+    if unexpected_paths:
+        formatted = ", ".join(sorted(unexpected_paths))
+        raise SystemExit(f"working tree has unrelated changes; commit or stash before running update.py: {formatted}")
+
+    if "hashes.json" not in changed_paths:
         raise SystemExit("working tree is not clean; commit or stash changes before running update.py")
+
+    head_hashes = read_head_hashes()
+    unchanged_fields = [
+        key
+        for key in ("version", "srcHash")
+        if hashes[key] == head_hashes[key]
+    ]
+    if unchanged_fields:
+        formatted = ", ".join(unchanged_fields)
+        raise SystemExit(
+            "cannot recover update state because hashes.json did not update required field(s): "
+            + formatted
+        )
+
+    bun_is_fake = hashes["bunHash"] == FAKE_HASH
+    cargo_is_fake = hashes["cargoHash"] == FAKE_HASH
+    if cargo_is_fake and not bun_is_fake:
+        raise SystemExit("cannot recover inconsistent hash state: cargoHash is fake but bunHash is resolved")
+    if cargo_is_fake:
+        return "resolve-cargo"
+    if bun_is_fake:
+        return "resolve-bun"
+    return "verify"
 
 
 def get_latest_tag() -> str:
@@ -104,14 +171,6 @@ def require_upstream_tag(tag: str) -> None:
     )
 
 
-def get_current_version() -> str:
-    data = json.loads(HASHES.read_text())
-    version = data.get("version")
-    if not isinstance(version, str) or not version:
-        raise SystemExit("could not parse current version from hashes.json")
-    return version
-
-
 def download_tarball(tag: str, workdir: Path) -> Path:
     tarball_path = workdir / f"{tag}.tar.gz"
     urllib.request.urlretrieve(
@@ -131,6 +190,14 @@ def extract_tarball(tarball_path: Path, workdir: Path) -> Path:
     if len(candidates) != 1:
         raise SystemExit("could not determine extracted source directory")
     return candidates[0]
+
+
+def get_current_rust_toolchain_channel() -> str:
+    content = FLAKE.read_text()
+    match = re.search(r'^\s*rustToolchainChannel = "([^"]+)";$', content, re.MULTILINE)
+    if match is None:
+        raise SystemExit("could not parse rust toolchain channel from flake.nix")
+    return match.group(1)
 
 
 def get_rust_toolchain_channel(source_dir: Path) -> str:
@@ -181,7 +248,7 @@ def extract_fixed_output_hashes(version: str, build_output: str) -> tuple[str | 
         drv_name = Path(match.group(1)).name
         drv_label = drv_name.split("-", 1)[1] if "-" in drv_name else drv_name
         got_hash = match.group(3)
-        if drv_label == "cargo-deps-vendor-staging.drv":
+        if drv_label in {"cargo-deps-vendor-staging.drv", "cargo-deps-vendor.drv"}:
             cargo_hash = got_hash
             continue
         if drv_label == bun_drv_name:
@@ -198,37 +265,79 @@ def extract_fixed_output_hashes(version: str, build_output: str) -> tuple[str | 
 
     return cargo_hash, bun_hash
 
-def resolve_fixed_output_hashes(version: str, rust_toolchain_channel: str, src_hash: str) -> tuple[str, str]:
-    cargo_hash = FAKE_HASH
-    bun_hash = FAKE_HASH
 
-    for _ in range(3):
-        update_flake(
-            version=version,
-            rust_toolchain_channel=rust_toolchain_channel,
-            src_hash=src_hash,
-            bun_hash=bun_hash,
-            cargo_hash=cargo_hash,
-        )
+def resolve_hash_from_build(
+    *,
+    version: str,
+    rust_toolchain_channel: str,
+    src_hash: str,
+    bun_hash: str,
+    cargo_hash: str,
+    installable: str,
+    dependency: str,
+) -> tuple[str, str]:
+    update_flake(
+        version=version,
+        rust_toolchain_channel=rust_toolchain_channel,
+        src_hash=src_hash,
+        bun_hash=bun_hash,
+        cargo_hash=cargo_hash,
+    )
 
-        returncode, output = run_and_capture_output("nix", "build", ".")
-        if returncode == 0:
-            return cargo_hash, bun_hash
+    returncode, output = run_and_capture_output("nix", "build", installable, "--no-link")
+    if returncode == 0:
+        raise SystemExit(f"{dependency} deps built successfully with a fake hash; cannot determine the real hash")
 
-        next_cargo_hash, next_bun_hash = extract_fixed_output_hashes(version, output)
-        updated = False
-        if next_cargo_hash is not None and next_cargo_hash != cargo_hash:
-            cargo_hash = next_cargo_hash
-            updated = True
-        if next_bun_hash is not None and next_bun_hash != bun_hash:
-            bun_hash = next_bun_hash
-            updated = True
-        if updated:
-            continue
+    next_cargo_hash, next_bun_hash = extract_fixed_output_hashes(version, output)
+    if dependency == "cargo":
+        if next_cargo_hash is None:
+            raise SystemExit(f"could not extract cargo dependency hash from nix output:\n\n{output}")
+        if next_bun_hash is not None:
+            raise SystemExit(f"unexpected bun dependency hash while resolving cargo deps:\n\n{output}")
+        cargo_hash = next_cargo_hash
+    elif dependency == "bun":
+        if next_bun_hash is None:
+            raise SystemExit(f"could not extract bun dependency hash from nix output:\n\n{output}")
+        if next_cargo_hash is not None:
+            raise SystemExit(f"unexpected cargo dependency hash while resolving bun deps:\n\n{output}")
+        bun_hash = next_bun_hash
+    else:
+        raise AssertionError(f"unsupported dependency kind: {dependency}")
 
-        raise SystemExit(f"nix build failed for an unexpected reason:\n\n{output}")
+    update_flake(
+        version=version,
+        rust_toolchain_channel=rust_toolchain_channel,
+        src_hash=src_hash,
+        bun_hash=bun_hash,
+        cargo_hash=cargo_hash,
+    )
+    return cargo_hash, bun_hash
 
-    raise SystemExit("failed to resolve fixed-output hashes after repeated nix builds")
+
+def resolve_cargo_hash(version: str, rust_toolchain_channel: str, src_hash: str, bun_hash: str) -> str:
+    cargo_hash, _ = resolve_hash_from_build(
+        version=version,
+        rust_toolchain_channel=rust_toolchain_channel,
+        src_hash=src_hash,
+        bun_hash=bun_hash,
+        cargo_hash=FAKE_HASH,
+        installable=".#default.cargoDeps",
+        dependency="cargo",
+    )
+    return cargo_hash
+
+
+def resolve_bun_hash(version: str, rust_toolchain_channel: str, src_hash: str, cargo_hash: str) -> str:
+    _, bun_hash = resolve_hash_from_build(
+        version=version,
+        rust_toolchain_channel=rust_toolchain_channel,
+        src_hash=src_hash,
+        bun_hash=FAKE_HASH,
+        cargo_hash=cargo_hash,
+        installable=".#default.bunDeps",
+        dependency="bun",
+    )
+    return bun_hash
 
 
 def run_omp_isolated(*args: str) -> None:
@@ -279,47 +388,87 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    require_clean_git_tree()
-    current_version = get_current_version()
-    latest_tag = normalize_tag(args.version) if args.version else get_latest_tag()
-    if args.version:
-        require_upstream_tag(latest_tag)
-    latest_version = latest_tag.removeprefix("v")
+    hashes = read_hashes()
+    recovery_state = get_recovery_state(hashes)
 
-    if latest_version == current_version:
-        print(f"Already up to date at {latest_tag}")
-        return 0
+    if recovery_state is None:
+        latest_tag = normalize_tag(args.version) if args.version else get_latest_tag()
+        if args.version:
+            require_upstream_tag(latest_tag)
+        latest_version = latest_tag.removeprefix("v")
 
-    TMP_ROOT.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="oh-my-pi-update-", dir=TMP_ROOT) as temp_dir:
-        workdir = Path(temp_dir)
-        tarball_path = download_tarball(latest_tag, workdir)
-        source_dir = extract_tarball(tarball_path, workdir)
-        rust_toolchain_channel = get_rust_toolchain_channel(source_dir)
-        src_hash = compute_src_hash(tarball_path)
+        if latest_version == hashes["version"]:
+            print(f"Already up to date at {latest_tag}")
+            return 0
 
-        print(f"Updating to {latest_tag}")
+        TMP_ROOT.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(prefix="oh-my-pi-update-", dir=TMP_ROOT) as temp_dir:
+            workdir = Path(temp_dir)
+            tarball_path = download_tarball(latest_tag, workdir)
+            source_dir = extract_tarball(tarball_path, workdir)
+            rust_toolchain_channel = get_rust_toolchain_channel(source_dir)
+            src_hash = compute_src_hash(tarball_path)
+
+            print(f"Updating to {latest_tag}")
+            print(f"  rust toolchain: {rust_toolchain_channel}")
+            print(f"  src hash:       {src_hash}")
+
+            update_flake(
+                version=latest_version,
+                rust_toolchain_channel=rust_toolchain_channel,
+                src_hash=src_hash,
+                bun_hash=FAKE_HASH,
+                cargo_hash=FAKE_HASH,
+            )
+            run("nix", "flake", "update", *INPUTS_TO_UPDATE, capture=False)
+
+            cargo_hash = resolve_cargo_hash(
+                version=latest_version,
+                rust_toolchain_channel=rust_toolchain_channel,
+                src_hash=src_hash,
+                bun_hash=FAKE_HASH,
+            )
+            bun_hash = resolve_bun_hash(
+                version=latest_version,
+                rust_toolchain_channel=rust_toolchain_channel,
+                src_hash=src_hash,
+                cargo_hash=cargo_hash,
+            )
+    else:
+        latest_version = hashes["version"]
+        latest_tag = normalize_tag(latest_version)
+        if args.version and normalize_tag(args.version) != latest_tag:
+            raise SystemExit(
+                f"cannot recover update for {latest_tag} while --version requests {normalize_tag(args.version)}"
+            )
+        rust_toolchain_channel = get_current_rust_toolchain_channel()
+        src_hash = hashes["srcHash"]
+        cargo_hash = hashes["cargoHash"]
+        bun_hash = hashes["bunHash"]
+
+        print(f"Recovering update for {latest_tag} from state: {recovery_state}")
         print(f"  rust toolchain: {rust_toolchain_channel}")
         print(f"  src hash:       {src_hash}")
 
-        update_flake(
-            version=latest_version,
-            rust_toolchain_channel=rust_toolchain_channel,
-            src_hash=src_hash,
-            bun_hash=FAKE_HASH,
-            cargo_hash=FAKE_HASH,
-        )
-        run("nix", "flake", "update", *INPUTS_TO_UPDATE, capture=False)
+        if recovery_state == "resolve-cargo":
+            run("nix", "flake", "update", *INPUTS_TO_UPDATE, capture=False)
+            cargo_hash = resolve_cargo_hash(
+                version=latest_version,
+                rust_toolchain_channel=rust_toolchain_channel,
+                src_hash=src_hash,
+                bun_hash=FAKE_HASH,
+            )
 
-        cargo_hash, bun_hash = resolve_fixed_output_hashes(
-            version=latest_version,
-            rust_toolchain_channel=rust_toolchain_channel,
-            src_hash=src_hash,
-        )
+        if recovery_state in {"resolve-cargo", "resolve-bun"}:
+            bun_hash = resolve_bun_hash(
+                version=latest_version,
+                rust_toolchain_channel=rust_toolchain_channel,
+                src_hash=src_hash,
+                cargo_hash=cargo_hash,
+            )
 
-        print(f"  cargo hash:     {cargo_hash}")
-        print(f"  bun hash:       {bun_hash}")
-
+    print(f"  cargo hash:     {cargo_hash}")
+    print(f"  bun hash:       {bun_hash}")
     verify_build()
     stage_and_commit(latest_tag)
     print(f"Committed update for {latest_tag}. Review locally, then push when ready.")

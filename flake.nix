@@ -178,10 +178,12 @@
 
           "$out/bin/omp" --version
 
-          if compgen -G "$out/lib/omp/pi_natives.*.node" > /dev/null; then
-            echo "unexpected standalone pi_natives addon installed next to omp"
-            exit 1
-          fi
+          for nativeAddon in "$out"/lib/omp/pi_natives.*.node; do
+            if [ -f "$nativeAddon" ]; then
+              echo "unexpected standalone pi_natives addon installed next to omp: $nativeAddon"
+              exit 1
+            fi
+          done
 
           runHook postInstallCheck
         '';
