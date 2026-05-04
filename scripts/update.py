@@ -22,10 +22,21 @@ UPSTREAM_TAG_GLOB = "v*.*.*"
 INPUTS_TO_UPDATE = ("nixpkgs", "rust-overlay")
 FAKE_HASH = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 FLAKE = ROOT / "flake.nix"
-RECOVERABLE_CHANGED_PATHS = {"flake.nix", "flake.lock", "hashes.json", "scripts/update.py"}
+RECOVERABLE_CHANGED_PATHS = {
+    "flake.nix",
+    "flake.lock",
+    "hashes.json",
+    "scripts/update.py",
+}
 HASH_KEYS = ("version", "srcHash", "bunHash", "cargoHash")
 
-def run(*args: str, cwd: Path | None = None, env: dict[str, str] | None = None, capture: bool = True) -> str:
+
+def run(
+    *args: str,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    capture: bool = True,
+) -> str:
     result = subprocess.run(
         list(args),
         cwd=cwd or ROOT,
@@ -42,7 +53,7 @@ def run_and_capture_output(
     *args: str,
     cwd: Path | None = None,
     env: dict[str, str] | None = None,
- ) -> tuple[int, str]:
+) -> tuple[int, str]:
     process = subprocess.Popen(
         list(args),
         cwd=cwd or ROOT,
@@ -99,22 +110,26 @@ def get_recovery_state(hashes: dict[str, str]) -> str | None:
     changed_paths = git_changed_paths_vs_head()
     if not changed_paths:
         if hashes["bunHash"] == FAKE_HASH or hashes["cargoHash"] == FAKE_HASH:
-            raise SystemExit("hashes.json contains a fake dependency hash, but there is no update state to recover")
+            raise SystemExit(
+                "hashes.json contains a fake dependency hash, but there is no update state to recover"
+            )
         return None
 
     unexpected_paths = changed_paths - RECOVERABLE_CHANGED_PATHS
     if unexpected_paths:
         formatted = ", ".join(sorted(unexpected_paths))
-        raise SystemExit(f"working tree has unrelated changes; commit or stash before running update.py: {formatted}")
+        raise SystemExit(
+            f"working tree has unrelated changes; commit or stash before running update.py: {formatted}"
+        )
 
     if "hashes.json" not in changed_paths:
-        raise SystemExit("working tree is not clean; commit or stash changes before running update.py")
+        raise SystemExit(
+            "working tree is not clean; commit or stash changes before running update.py"
+        )
 
     head_hashes = read_head_hashes()
     unchanged_fields = [
-        key
-        for key in ("version", "srcHash")
-        if hashes[key] == head_hashes[key]
+        key for key in ("version", "srcHash") if hashes[key] == head_hashes[key]
     ]
     if unchanged_fields:
         formatted = ", ".join(unchanged_fields)
@@ -126,7 +141,9 @@ def get_recovery_state(hashes: dict[str, str]) -> str | None:
     bun_is_fake = hashes["bunHash"] == FAKE_HASH
     cargo_is_fake = hashes["cargoHash"] == FAKE_HASH
     if cargo_is_fake and not bun_is_fake:
-        raise SystemExit("cannot recover inconsistent hash state: cargoHash is fake but bunHash is resolved")
+        raise SystemExit(
+            "cannot recover inconsistent hash state: cargoHash is fake but bunHash is resolved"
+        )
     if cargo_is_fake:
         return "resolve-cargo"
     if bun_is_fake:
@@ -186,7 +203,11 @@ def extract_tarball(tarball_path: Path, workdir: Path) -> Path:
         if hasattr(tarfile, "data_filter"):
             extract_kwargs["filter"] = "data"
         archive.extractall(**extract_kwargs)
-    candidates = [path for path in workdir.iterdir() if path.is_dir() and path.name.startswith("oh-my-pi-")]
+    candidates = [
+        path
+        for path in workdir.iterdir()
+        if path.is_dir() and path.name.startswith("oh-my-pi-")
+    ]
     if len(candidates) != 1:
         raise SystemExit("could not determine extracted source directory")
     return candidates[0]
@@ -204,7 +225,9 @@ def get_rust_toolchain_channel(source_dir: Path) -> str:
     content = (source_dir / "rust-toolchain.toml").read_text()
     match = re.search(r'^channel = "([^"]+)"$', content, re.MULTILINE)
     if match is None:
-        raise SystemExit("could not parse rust toolchain channel from rust-toolchain.toml")
+        raise SystemExit(
+            "could not parse rust toolchain channel from rust-toolchain.toml"
+        )
     return match.group(1)
 
 
@@ -212,7 +235,13 @@ def compute_src_hash(tarball_path: Path) -> str:
     return run("nix", "hash", "file", "--sri", str(tarball_path))
 
 
-def update_flake(version: str, rust_toolchain_channel: str, src_hash: str, bun_hash: str, cargo_hash: str) -> None:
+def update_flake(
+    version: str,
+    rust_toolchain_channel: str,
+    src_hash: str,
+    bun_hash: str,
+    cargo_hash: str,
+) -> None:
     run(
         sys.executable,
         str(SCRIPT_DIR / "update-flake.py"),
@@ -230,7 +259,9 @@ def update_flake(version: str, rust_toolchain_channel: str, src_hash: str, bun_h
     )
 
 
-def extract_fixed_output_hashes(version: str, build_output: str) -> tuple[str | None, str | None]:
+def extract_fixed_output_hashes(
+    version: str, build_output: str
+) -> tuple[str | None, str | None]:
     matches = list(
         re.finditer(
             r"hash mismatch in fixed-output derivation '([^']+)':\n\s*specified:\s*(sha256-[A-Za-z0-9+/=]+)\n\s*got:\s*(sha256-[A-Za-z0-9+/=]+)",
@@ -238,7 +269,9 @@ def extract_fixed_output_hashes(version: str, build_output: str) -> tuple[str | 
         )
     )
     if not matches:
-        raise SystemExit(f"could not extract fixed-output hash from nix output:\n\n{build_output}")
+        raise SystemExit(
+            f"could not extract fixed-output hash from nix output:\n\n{build_output}"
+        )
 
     cargo_hash: str | None = None
     bun_hash: str | None = None
@@ -284,22 +317,34 @@ def resolve_hash_from_build(
         cargo_hash=cargo_hash,
     )
 
-    returncode, output = run_and_capture_output("nix", "build", installable, "--no-link")
+    returncode, output = run_and_capture_output(
+        "nix", "build", installable, "--no-link"
+    )
     if returncode == 0:
-        raise SystemExit(f"{dependency} deps built successfully with a fake hash; cannot determine the real hash")
+        raise SystemExit(
+            f"{dependency} deps built successfully with a fake hash; cannot determine the real hash"
+        )
 
     next_cargo_hash, next_bun_hash = extract_fixed_output_hashes(version, output)
     if dependency == "cargo":
         if next_cargo_hash is None:
-            raise SystemExit(f"could not extract cargo dependency hash from nix output:\n\n{output}")
+            raise SystemExit(
+                f"could not extract cargo dependency hash from nix output:\n\n{output}"
+            )
         if next_bun_hash is not None:
-            raise SystemExit(f"unexpected bun dependency hash while resolving cargo deps:\n\n{output}")
+            raise SystemExit(
+                f"unexpected bun dependency hash while resolving cargo deps:\n\n{output}"
+            )
         cargo_hash = next_cargo_hash
     elif dependency == "bun":
         if next_bun_hash is None:
-            raise SystemExit(f"could not extract bun dependency hash from nix output:\n\n{output}")
+            raise SystemExit(
+                f"could not extract bun dependency hash from nix output:\n\n{output}"
+            )
         if next_cargo_hash is not None:
-            raise SystemExit(f"unexpected cargo dependency hash while resolving bun deps:\n\n{output}")
+            raise SystemExit(
+                f"unexpected cargo dependency hash while resolving bun deps:\n\n{output}"
+            )
         bun_hash = next_bun_hash
     else:
         raise AssertionError(f"unsupported dependency kind: {dependency}")
@@ -314,7 +359,9 @@ def resolve_hash_from_build(
     return cargo_hash, bun_hash
 
 
-def resolve_cargo_hash(version: str, rust_toolchain_channel: str, src_hash: str, bun_hash: str) -> str:
+def resolve_cargo_hash(
+    version: str, rust_toolchain_channel: str, src_hash: str, bun_hash: str
+) -> str:
     cargo_hash, _ = resolve_hash_from_build(
         version=version,
         rust_toolchain_channel=rust_toolchain_channel,
@@ -327,7 +374,9 @@ def resolve_cargo_hash(version: str, rust_toolchain_channel: str, src_hash: str,
     return cargo_hash
 
 
-def resolve_bun_hash(version: str, rust_toolchain_channel: str, src_hash: str, cargo_hash: str) -> str:
+def resolve_bun_hash(
+    version: str, rust_toolchain_channel: str, src_hash: str, cargo_hash: str
+) -> str:
     _, bun_hash = resolve_hash_from_build(
         version=version,
         rust_toolchain_channel=rust_toolchain_channel,
@@ -342,7 +391,9 @@ def resolve_bun_hash(version: str, rust_toolchain_channel: str, src_hash: str, c
 
 def run_omp_isolated(*args: str) -> None:
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="oh-my-pi-smoke-", dir=TMP_ROOT) as temp_dir:
+    with tempfile.TemporaryDirectory(
+        prefix="oh-my-pi-smoke-", dir=TMP_ROOT
+    ) as temp_dir:
         temp_path = Path(temp_dir)
         home = temp_path / "home"
         xdg_data_home = temp_path / "xdg-data"
@@ -364,7 +415,9 @@ def verify_no_installed_native_addons() -> None:
     addon_paths = sorted((ROOT / "result/lib/omp").glob("pi_natives.*.node"))
     if addon_paths:
         formatted = "\n".join(f"  {path.relative_to(ROOT)}" for path in addon_paths)
-        raise SystemExit(f"unexpected standalone native addon(s) installed next to omp:\n{formatted}")
+        raise SystemExit(
+            f"unexpected standalone native addon(s) installed next to omp:\n{formatted}"
+        )
 
 
 def verify_build() -> None:
@@ -381,7 +434,9 @@ def stage_and_commit(tag: str) -> None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Update this flake to an upstream Oh My Pi release")
+    parser = argparse.ArgumentParser(
+        description="Update this flake to an upstream Oh My Pi release"
+    )
     parser.add_argument(
         "--version",
         help="target upstream version, for example 14.5.14 or v14.5.14; defaults to the latest tag",
@@ -402,7 +457,9 @@ def main() -> int:
             return 0
 
         TMP_ROOT.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="oh-my-pi-update-", dir=TMP_ROOT) as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="oh-my-pi-update-", dir=TMP_ROOT
+        ) as temp_dir:
             workdir = Path(temp_dir)
             tarball_path = download_tarball(latest_tag, workdir)
             source_dir = extract_tarball(tarball_path, workdir)

@@ -14,15 +14,21 @@ FLAKE = ROOT / "flake.nix"
 HASHES = ROOT / "hashes.json"
 
 
-def replace_once(text: str, pattern: str, replacement: str | Callable[[re.Match[str]], str]) -> str:
-    updated, count = re.subn(pattern, replacement, text, count=1, flags=re.MULTILINE | re.DOTALL)
+def replace_once(
+    text: str, pattern: str, replacement: str | Callable[[re.Match[str]], str]
+) -> str:
+    updated, count = re.subn(
+        pattern, replacement, text, count=1, flags=re.MULTILINE | re.DOTALL
+    )
     if count != 1:
         raise RuntimeError(f"expected exactly one match for pattern: {pattern}")
     return updated
 
 
 def replace_captured_value(text: str, pattern: str, value: str) -> str:
-    return replace_once(text, pattern, lambda match: f"{match.group(1)}{value}{match.group(2)}")
+    return replace_once(
+        text, pattern, lambda match: f"{match.group(1)}{value}{match.group(2)}"
+    )
 
 
 def update_flake_text(
@@ -37,7 +43,9 @@ def update_flake_text(
     )
 
 
-def write_hashes(*, version: str, src_hash: str, bun_hash: str, cargo_hash: str) -> None:
+def write_hashes(
+    *, version: str, src_hash: str, bun_hash: str, cargo_hash: str
+) -> None:
     HASHES.write_text(
         json.dumps(
             {
@@ -53,7 +61,9 @@ def write_hashes(*, version: str, src_hash: str, bun_hash: str, cargo_hash: str)
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Update versioned values in flake.nix and hashes.json")
+    parser = argparse.ArgumentParser(
+        description="Update versioned values in flake.nix and hashes.json"
+    )
     parser.add_argument("--version", required=True)
     parser.add_argument("--rust-toolchain-channel", required=True)
     parser.add_argument("--src-hash", required=True)

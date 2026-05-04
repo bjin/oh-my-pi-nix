@@ -26,7 +26,9 @@ def run(*args: str, cwd: Path | None = None, capture: bool = True) -> str:
 def require_clean_git_tree() -> None:
     porcelain = run("git", "status", "--porcelain")
     if porcelain:
-        raise SystemExit("working tree is not clean; commit or stash changes before running update-deps.py")
+        raise SystemExit(
+            "working tree is not clean; commit or stash changes before running update-deps.py"
+        )
 
 
 def read_locked_revs() -> dict[str, str]:
