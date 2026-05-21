@@ -40,13 +40,13 @@ jobs:
         run: nix flake show --no-write-lock-file .
 
       - name: Build package
-        run: nix build ".#${{ matrix.package.attr }}" --out-link "${{ matrix.package.out_link }}"
+        run: 'nix build ".#${{ matrix.package.attr }}" --out-link "${{ matrix.package.out_link }}"'
 
       - name: Print version
-        run: "./${{ matrix.package.out_link }}/bin/omp" --version
+        run: '"./${{ matrix.package.out_link }}/bin/omp" --version'
 
       - name: Smoke test grep command
-        run: "./${{ matrix.package.out_link }}/bin/omp" grep oh-my-pi .
+        run: '"./${{ matrix.package.out_link }}/bin/omp" grep oh-my-pi .'
 
       - name: Upload package to Cachix
         if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CACHIX_CACHE_NAME != ''
