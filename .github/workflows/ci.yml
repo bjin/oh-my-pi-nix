@@ -10,8 +10,17 @@ permissions:
 
 jobs:
   build-and-upload-to-cachix:
-    name: Build, smoke test, and upload to Cachix
+    name: Build, smoke test, and upload ${{ matrix.package.attr }} to Cachix
     runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - attr: oh-my-pi
+            out_link: result-oh-my-pi
+          - attr: oh-my-pi-bin
+            out_link: result-oh-my-pi-bin
 
     steps:
       - name: Check out repository
@@ -31,13 +40,13 @@ jobs:
         run: nix flake show --no-write-lock-file .
 
       - name: Build package
-        run: nix build .
+        run: nix build ".#${{ matrix.package.attr }}" --out-link "${{ matrix.package.out_link }}"
 
       - name: Print version
-        run: ./result/bin/omp --version
+        run: "./${{ matrix.package.out_link }}/bin/omp" --version
 
       - name: Smoke test grep command
-        run: ./result/bin/omp grep oh-my-pi .
+        run: "./${{ matrix.package.out_link }}/bin/omp" grep oh-my-pi .
 
       - name: Upload package to Cachix
         if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CACHIX_CACHE_NAME != ''
@@ -51,4 +60,4 @@ jobs:
           fi
 
           cachix authtoken "$CACHIX_AUTH_TOKEN"
-          readlink -f result | cachix push "$CACHIX_CACHE_NAME"
+          readlink -f "${{ matrix.package.out_link }}" | cachix push "$CACHIX_CACHE_NAME"
