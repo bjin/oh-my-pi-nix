@@ -36,6 +36,13 @@
         export XDG_DATA_HOME="$TMPDIR/check-xdg-data"
         mkdir -p "$HOME" "$XDG_DATA_HOME/omp"
       '';
+      relaxBunEngine = ''
+        # Relax engines.bun to match the bun used for compilation. Upstream may
+        # require a newer bun than nixpkgs carries, but the generated CLI runs
+        # correctly with the compiler's embedded runtime.
+        sed -i 's/"bun": ">=[0-9.]*"/"bun": ">='"$(bun --version)"'"/' \
+          packages/utils/package.json
+      '';
       commonMeta = {
         description = "AI coding agent for the terminal";
         homepage = "https://github.com/can1357/oh-my-pi";
@@ -88,6 +95,7 @@
         strictDeps = true;
         dontConfigure = true;
         dontFixup = true;
+        postPatch = relaxBunEngine;
         impureEnvVars = lib.fetchers.proxyImpureEnvVars;
 
         buildPhase = ''
@@ -143,6 +151,7 @@
         ];
         strictDeps = true;
         dontStrip = true;
+        postPatch = relaxBunEngine;
 
         buildPhase = ''
           runHook preBuild
