@@ -43,6 +43,18 @@
         sed -i 's/"bun": ">=[0-9.]*"/"bun": ">='"$(bun --version)"'"/' \
           packages/utils/package.json
       '';
+      useLooseNativeAddons = ''
+        # Nix can keep native addons in the immutable store next to the compiled
+        # executable. Do not follow upstream's release path that embeds a
+        # compressed native archive into `omp`; the upstream loader must extract
+        # that archive into the user's data directory before dlopen(3) can load
+        # it.
+        substituteInPlace packages/coding-agent/scripts/build-binary.ts \
+          --replace-fail 'await runCommand(["bun", "--cwd=../natives", "run", "embed:native"]);' \
+            '// Nix ships pi_natives.*.node next to the compiled binary.' \
+          --replace-fail 'await runCommand(["bun", "--cwd=../natives", "run", "embed:native", "--reset"]);' \
+            '// No embedded native archive was generated.'
+      '';
       commonMeta = {
         description = "AI coding agent for the terminal";
         homepage = "https://github.com/can1357/oh-my-pi";
@@ -151,7 +163,10 @@
         ];
         strictDeps = true;
         dontStrip = true;
-        postPatch = relaxBunEngine;
+        postPatch = ''
+          ${relaxBunEngine}
+          ${useLooseNativeAddons}
+        '';
 
         buildPhase = ''
           runHook preBuild
@@ -180,6 +195,10 @@
           runHook preInstall
 
           install -Dm755 packages/coding-agent/dist/omp "$out/lib/omp/omp"
+          install -Dm755 packages/natives/native/pi_natives.linux-x64-baseline.node \
+            "$out/lib/omp/pi_natives.linux-x64-baseline.node"
+          install -Dm755 packages/natives/native/pi_natives.linux-x64-modern.node \
+            "$out/lib/omp/pi_natives.linux-x64-modern.node"
           makeWrapper "$out/lib/omp/omp" "$out/bin/omp" \
             --set PI_SKIP_VERSION_CHECK 1 \
             --prefix LD_LIBRARY_PATH : "${runtimeLibraryPath}"
@@ -193,14 +212,14 @@
           runHook preInstallCheck
 
           ${installCheckEnvironment}
-          "$out/bin/omp" --version
+          "$out/bin/omp" --smoke-test
 
-          for nativeAddon in "$out"/lib/omp/pi_natives.*.node; do
-            if [ -f "$nativeAddon" ]; then
-              echo "unexpected standalone pi_natives addon installed next to omp: $nativeAddon"
-              exit 1
-            fi
-          done
+          test -x "$out/lib/omp/pi_natives.linux-x64-baseline.node"
+          test -x "$out/lib/omp/pi_natives.linux-x64-modern.node"
+          if [ -e "$XDG_DATA_HOME/omp/natives" ] || [ -e "$HOME/.omp/natives" ]; then
+            echo "omp wrote native addons to a user cache"
+            exit 1
+          fi
 
           runHook postInstallCheck
         '';
