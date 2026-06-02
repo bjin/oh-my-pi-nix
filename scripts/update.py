@@ -411,12 +411,19 @@ def run_omp_isolated(*args: str) -> None:
         )
 
 
-def verify_no_installed_native_addons() -> None:
-    addon_paths = sorted((ROOT / "result/lib/omp").glob("pi_natives.*.node"))
-    if addon_paths:
-        formatted = "\n".join(f"  {path.relative_to(ROOT)}" for path in addon_paths)
+def verify_no_embedded_native_addons() -> None:
+    omp_binary = ROOT / "result/lib/omp/omp"
+    embedded_markers = (
+        b"embedded-addons.linux-x64.tar.gz",
+        b"pi_natives.linux-x64-baseline.node",
+        b"pi_natives.linux-x64-modern.node",
+    )
+    binary = omp_binary.read_bytes()
+    found_markers = [marker.decode() for marker in embedded_markers if marker in binary]
+    if found_markers:
+        formatted = "\n".join(f"  {marker}" for marker in found_markers)
         raise SystemExit(
-            f"unexpected standalone native addon(s) installed next to omp:\n{formatted}"
+            f"omp binary embeds native addon metadata; expected loose .node files:\n{formatted}"
         )
 
 
@@ -424,7 +431,7 @@ def verify_build() -> None:
     run("nix", "fmt", "flake.nix", capture=False)
     run("nix", "build", ".", capture=False)
     run_omp_isolated("--version")
-    verify_no_installed_native_addons()
+    verify_no_embedded_native_addons()
     run_omp_isolated("grep", "oh-my-pi", ".")
 
 
