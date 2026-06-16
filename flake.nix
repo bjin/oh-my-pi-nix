@@ -186,6 +186,7 @@
 
           CI=1 TARGET_VARIANTS="baseline modern" bun run ci:build:native
           bun --cwd=packages/coding-agent run generate-docs-index
+          bun run build-tool-views
           bun --cwd=packages/coding-agent run build
 
           runHook postBuild
