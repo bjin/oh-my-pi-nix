@@ -50,8 +50,8 @@
         # that archive into the user's data directory before dlopen(3) can load
         # it.
         substituteInPlace packages/coding-agent/scripts/build-binary.ts \
-          --replace-fail 'await runCommand(["bun", "--cwd=../natives", "run", "embed:native"]);' \
-            '// Nix ships pi_natives.*.node next to the compiled binary.' \
+          --replace-fail '["bun", "--cwd=../natives", "run", "embed:native"],' \
+            '["bun", "--cwd=../natives", "run", "embed:native", "--reset"],' \
           --replace-fail 'await runCommand(["bun", "--cwd=../natives", "run", "embed:native", "--reset"]);' \
             '// No embedded native archive was generated.'
       '';
