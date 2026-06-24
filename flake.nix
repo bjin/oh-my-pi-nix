@@ -64,10 +64,16 @@
       };
 
       sourceVersion = sourceData.version;
+      sourceRev = sourceData.srcRev;
       rustToolchainChannel = "nightly-2026-04-29";
       rustTarget = "x86_64-unknown-linux-gnu";
-      sourceSrc = pkgs.fetchurl {
-        url = "https://github.com/can1357/oh-my-pi/archive/refs/tags/v${sourceVersion}.tar.gz";
+      sourceSrc = pkgs.fetchgit {
+        url = "https://github.com/can1357/oh-my-pi.git";
+        rev = sourceRev;
+        deepClone = false;
+        fetchSubmodules = false;
+        fetchTags = false;
+        leaveDotGit = false;
         hash = sourceData.srcHash;
       };
 
@@ -101,7 +107,6 @@
       bunDeps = pkgs.stdenvNoCC.mkDerivation {
         name = "${pname}-${sourceVersion}-bun-deps";
         src = sourceSrc;
-        sourceRoot = "${pname}-${sourceVersion}";
 
         nativeBuildInputs = [ pkgs.bun ];
         strictDeps = true;
@@ -138,7 +143,6 @@
 
       cargoDeps = rustPlatform.fetchCargoVendor {
         src = sourceSrc;
-        sourceRoot = "${pname}-${sourceVersion}";
         hash = sourceData.cargoHash;
       };
 
@@ -146,7 +150,6 @@
         inherit pname cargoDeps;
         version = sourceVersion;
         src = sourceSrc;
-        sourceRoot = "${pname}-${sourceVersion}";
 
         nativeBuildInputs = [
           pkgs.autoPatchelfHook

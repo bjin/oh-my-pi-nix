@@ -44,12 +44,13 @@ def update_flake_text(
 
 
 def write_hashes(
-    *, version: str, src_hash: str, bun_hash: str, cargo_hash: str
+    *, version: str, src_rev: str, src_hash: str, bun_hash: str, cargo_hash: str
 ) -> None:
     HASHES.write_text(
         json.dumps(
             {
                 "version": version,
+                "srcRev": src_rev,
                 "srcHash": src_hash,
                 "bunHash": bun_hash,
                 "cargoHash": cargo_hash,
@@ -65,6 +66,7 @@ def main() -> int:
         description="Update versioned values in flake.nix and hashes.json"
     )
     parser.add_argument("--version", required=True)
+    parser.add_argument("--src-rev", required=True)
     parser.add_argument("--rust-toolchain-channel", required=True)
     parser.add_argument("--src-hash", required=True)
     parser.add_argument("--bun-hash", required=True)
@@ -79,6 +81,7 @@ def main() -> int:
     )
     write_hashes(
         version=args.version,
+        src_rev=args.src_rev,
         src_hash=args.src_hash,
         bun_hash=args.bun_hash,
         cargo_hash=args.cargo_hash,

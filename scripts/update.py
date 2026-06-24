@@ -6,11 +6,10 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
-import urllib.request
 from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
@@ -27,8 +26,9 @@ RECOVERABLE_CHANGED_PATHS = {
     "flake.lock",
     "hashes.json",
     "scripts/update.py",
+    "scripts/update-flake.py",
 }
-HASH_KEYS = ("version", "srcHash", "bunHash", "cargoHash")
+HASH_KEYS = ("version", "srcRev", "srcHash", "bunHash", "cargoHash")
 
 
 def run(
@@ -128,14 +128,9 @@ def get_recovery_state(hashes: dict[str, str]) -> str | None:
         )
 
     head_hashes = read_head_hashes()
-    unchanged_fields = [
-        key for key in ("version", "srcHash") if hashes[key] == head_hashes[key]
-    ]
-    if unchanged_fields:
-        formatted = ", ".join(unchanged_fields)
+    if all(hashes[key] == head_hashes[key] for key in ("version", "srcRev")):
         raise SystemExit(
-            "cannot recover update state because hashes.json did not update required field(s): "
-            + formatted
+            "cannot recover update state because hashes.json did not update version or srcRev"
         )
 
     bun_is_fake = hashes["bunHash"] == FAKE_HASH
@@ -151,7 +146,31 @@ def get_recovery_state(hashes: dict[str, str]) -> str | None:
     return "verify"
 
 
-def get_latest_tag() -> str:
+def resolve_tag_revision(tag: str) -> str:
+    output = run(
+        "git",
+        "ls-remote",
+        "--exit-code",
+        UPSTREAM_REPO_URL,
+        f"refs/tags/{tag}",
+        f"refs/tags/{tag}^{{}}",
+    )
+    refs: dict[str, str] = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            raise SystemExit(f"unexpected upstream ref line: {line}")
+        refs[parts[1]] = parts[0]
+
+    rev = refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")
+    if rev is None:
+        raise SystemExit(f"upstream tag does not exist: {tag}")
+    if not re.fullmatch(r"[0-9a-f]{40}", rev):
+        raise SystemExit(f"unexpected upstream revision for {tag}: {rev}")
+    return rev
+
+
+def get_latest_tag() -> tuple[str, str]:
     output = run(
         "git",
         "ls-remote",
@@ -161,12 +180,14 @@ def get_latest_tag() -> str:
         UPSTREAM_REPO_URL,
         UPSTREAM_TAG_GLOB,
     )
-    first_line = output.splitlines()[0]
-    ref = first_line.split()[1]
+    lines = output.splitlines()
+    if not lines:
+        raise SystemExit("could not find upstream release tags")
+    ref = lines[0].split()[1]
     tag = ref.removeprefix("refs/tags/")
     if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
         raise SystemExit(f"unexpected upstream tag format: {tag}")
-    return tag
+    return tag, resolve_tag_revision(tag)
 
 
 def normalize_tag(raw_version: str) -> str:
@@ -176,41 +197,32 @@ def normalize_tag(raw_version: str) -> str:
     return tag
 
 
-def require_upstream_tag(tag: str) -> None:
+def require_upstream_tag(tag: str) -> str:
+    return resolve_tag_revision(tag)
+
+
+def checkout_source(tag: str, rev: str, workdir: Path) -> Path:
+    source_dir = workdir / "source"
     run(
         "git",
-        "ls-remote",
-        "--exit-code",
-        "--refs",
-        "--tags",
-        UPSTREAM_REPO_URL,
+        "clone",
+        "--quiet",
+        "--depth",
+        "1",
+        "--branch",
         tag,
+        UPSTREAM_REPO_URL,
+        str(source_dir),
+        cwd=workdir,
+        capture=False,
     )
-
-
-def download_tarball(tag: str, workdir: Path) -> Path:
-    tarball_path = workdir / f"{tag}.tar.gz"
-    urllib.request.urlretrieve(
-        f"https://github.com/can1357/oh-my-pi/archive/refs/tags/{tag}.tar.gz",
-        tarball_path,
-    )
-    return tarball_path
-
-
-def extract_tarball(tarball_path: Path, workdir: Path) -> Path:
-    with tarfile.open(tarball_path, "r:gz") as archive:
-        extract_kwargs = {"path": workdir}
-        if hasattr(tarfile, "data_filter"):
-            extract_kwargs["filter"] = "data"
-        archive.extractall(**extract_kwargs)
-    candidates = [
-        path
-        for path in workdir.iterdir()
-        if path.is_dir() and path.name.startswith("oh-my-pi-")
-    ]
-    if len(candidates) != 1:
-        raise SystemExit("could not determine extracted source directory")
-    return candidates[0]
+    actual_rev = run("git", "-C", str(source_dir), "rev-parse", "HEAD")
+    if actual_rev != rev:
+        raise SystemExit(
+            f"upstream tag {tag} moved while updating: expected {rev}, got {actual_rev}"
+        )
+    shutil.rmtree(source_dir / ".git")
+    return source_dir
 
 
 def get_current_rust_toolchain_channel() -> str:
@@ -231,12 +243,13 @@ def get_rust_toolchain_channel(source_dir: Path) -> str:
     return match.group(1)
 
 
-def compute_src_hash(tarball_path: Path) -> str:
-    return run("nix", "hash", "file", "--sri", str(tarball_path))
+def compute_src_hash(source_dir: Path) -> str:
+    return run("nix", "hash", "path", "--sri", str(source_dir))
 
 
 def update_flake(
     version: str,
+    src_rev: str,
     rust_toolchain_channel: str,
     src_hash: str,
     bun_hash: str,
@@ -247,6 +260,8 @@ def update_flake(
         str(SCRIPT_DIR / "update-flake.py"),
         "--version",
         version,
+        "--src-rev",
+        src_rev,
         "--rust-toolchain-channel",
         rust_toolchain_channel,
         "--src-hash",
@@ -302,6 +317,7 @@ def extract_fixed_output_hashes(
 def resolve_hash_from_build(
     *,
     version: str,
+    src_rev: str,
     rust_toolchain_channel: str,
     src_hash: str,
     bun_hash: str,
@@ -311,6 +327,7 @@ def resolve_hash_from_build(
 ) -> tuple[str, str]:
     update_flake(
         version=version,
+        src_rev=src_rev,
         rust_toolchain_channel=rust_toolchain_channel,
         src_hash=src_hash,
         bun_hash=bun_hash,
@@ -351,6 +368,7 @@ def resolve_hash_from_build(
 
     update_flake(
         version=version,
+        src_rev=src_rev,
         rust_toolchain_channel=rust_toolchain_channel,
         src_hash=src_hash,
         bun_hash=bun_hash,
@@ -360,10 +378,15 @@ def resolve_hash_from_build(
 
 
 def resolve_cargo_hash(
-    version: str, rust_toolchain_channel: str, src_hash: str, bun_hash: str
+    version: str,
+    src_rev: str,
+    rust_toolchain_channel: str,
+    src_hash: str,
+    bun_hash: str,
 ) -> str:
     cargo_hash, _ = resolve_hash_from_build(
         version=version,
+        src_rev=src_rev,
         rust_toolchain_channel=rust_toolchain_channel,
         src_hash=src_hash,
         bun_hash=bun_hash,
@@ -375,10 +398,15 @@ def resolve_cargo_hash(
 
 
 def resolve_bun_hash(
-    version: str, rust_toolchain_channel: str, src_hash: str, cargo_hash: str
+    version: str,
+    src_rev: str,
+    rust_toolchain_channel: str,
+    src_hash: str,
+    cargo_hash: str,
 ) -> str:
     _, bun_hash = resolve_hash_from_build(
         version=version,
+        src_rev=src_rev,
         rust_toolchain_channel=rust_toolchain_channel,
         src_hash=src_hash,
         bun_hash=FAKE_HASH,
@@ -454,13 +482,15 @@ def main() -> int:
     recovery_state = get_recovery_state(hashes)
 
     if recovery_state is None:
-        latest_tag = normalize_tag(args.version) if args.version else get_latest_tag()
         if args.version:
-            require_upstream_tag(latest_tag)
+            latest_tag = normalize_tag(args.version)
+            latest_rev = require_upstream_tag(latest_tag)
+        else:
+            latest_tag, latest_rev = get_latest_tag()
         latest_version = latest_tag.removeprefix("v")
 
-        if latest_version == hashes["version"]:
-            print(f"Already up to date at {latest_tag}")
+        if latest_version == hashes["version"] and latest_rev == hashes["srcRev"]:
+            print(f"Already up to date at {latest_tag} ({latest_rev})")
             return 0
 
         TMP_ROOT.mkdir(parents=True, exist_ok=True)
@@ -468,17 +498,18 @@ def main() -> int:
             prefix="oh-my-pi-update-", dir=TMP_ROOT
         ) as temp_dir:
             workdir = Path(temp_dir)
-            tarball_path = download_tarball(latest_tag, workdir)
-            source_dir = extract_tarball(tarball_path, workdir)
+            source_dir = checkout_source(latest_tag, latest_rev, workdir)
             rust_toolchain_channel = get_rust_toolchain_channel(source_dir)
-            src_hash = compute_src_hash(tarball_path)
+            src_hash = compute_src_hash(source_dir)
 
             print(f"Updating to {latest_tag}")
+            print(f"  source rev:     {latest_rev}")
             print(f"  rust toolchain: {rust_toolchain_channel}")
             print(f"  src hash:       {src_hash}")
 
             update_flake(
                 version=latest_version,
+                src_rev=latest_rev,
                 rust_toolchain_channel=rust_toolchain_channel,
                 src_hash=src_hash,
                 bun_hash=FAKE_HASH,
@@ -488,12 +519,14 @@ def main() -> int:
 
             cargo_hash = resolve_cargo_hash(
                 version=latest_version,
+                src_rev=latest_rev,
                 rust_toolchain_channel=rust_toolchain_channel,
                 src_hash=src_hash,
                 bun_hash=FAKE_HASH,
             )
             bun_hash = resolve_bun_hash(
                 version=latest_version,
+                src_rev=latest_rev,
                 rust_toolchain_channel=rust_toolchain_channel,
                 src_hash=src_hash,
                 cargo_hash=cargo_hash,
@@ -501,6 +534,7 @@ def main() -> int:
     else:
         latest_version = hashes["version"]
         latest_tag = normalize_tag(latest_version)
+        latest_rev = hashes["srcRev"]
         if args.version and normalize_tag(args.version) != latest_tag:
             raise SystemExit(
                 f"cannot recover update for {latest_tag} while --version requests {normalize_tag(args.version)}"
@@ -511,6 +545,7 @@ def main() -> int:
         bun_hash = hashes["bunHash"]
 
         print(f"Recovering update for {latest_tag} from state: {recovery_state}")
+        print(f"  source rev:     {latest_rev}")
         print(f"  rust toolchain: {rust_toolchain_channel}")
         print(f"  src hash:       {src_hash}")
 
@@ -518,6 +553,7 @@ def main() -> int:
             run("nix", "flake", "update", *INPUTS_TO_UPDATE, capture=False)
             cargo_hash = resolve_cargo_hash(
                 version=latest_version,
+                src_rev=latest_rev,
                 rust_toolchain_channel=rust_toolchain_channel,
                 src_hash=src_hash,
                 bun_hash=FAKE_HASH,
@@ -526,6 +562,7 @@ def main() -> int:
         if recovery_state in {"resolve-cargo", "resolve-bun"}:
             bun_hash = resolve_bun_hash(
                 version=latest_version,
+                src_rev=latest_rev,
                 rust_toolchain_channel=rust_toolchain_channel,
                 src_hash=src_hash,
                 cargo_hash=cargo_hash,
