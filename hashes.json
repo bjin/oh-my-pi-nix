@@ -1,7 +1,7 @@
 {
-  "version": "16.1.19",
-  "srcRev": "451af61280fa4eb9b2f25dae650f894acf4178f4",
-  "srcHash": "sha256-erynSsK6psYRnqlvji2e8bhPjpJHO8wY+y59bZ47EOk=",
-  "bunHash": "sha256-alrzx00HOOBFInEmya+Gs5GHQBHMIn8tXz8vWxX1KLs=",
-  "cargoHash": "sha256-PGHDxPNXvg/KblSsNUGyrZ8ywaymHw0G5gbPengjo6M="
+  "version": "16.1.20",
+  "srcRev": "0fc6d136c34a279a711a2d3f2df9d64e0fa06cee",
+  "srcHash": "sha256-UY6JH4Tvvz7tx7bUZ2zLPxrfLs7ci5yTCU6bgQvDdSo=",
+  "bunHash": "sha256-dH9DFb37ExotxIN1TbZegG30MivzUvsH3iEcB8Gt3xE=",
+  "cargoHash": "sha256-NI9HPDavsMzUZx1O17bcYXDXABmLsMqAe2mpPJbuEE4="
 }
