@@ -18,7 +18,6 @@ TMP_ROOT = ROOT / ".tmp"
 HASHES = ROOT / "hashes.json"
 UPSTREAM_REPO_URL = "https://github.com/can1357/oh-my-pi.git"
 UPSTREAM_TAG_GLOB = "v*.*.*"
-INPUTS_TO_UPDATE = ("nixpkgs", "rust-overlay")
 FAKE_HASH = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 FLAKE = ROOT / "flake.nix"
 RECOVERABLE_CHANGED_PATHS = {
@@ -515,7 +514,6 @@ def main() -> int:
                 bun_hash=FAKE_HASH,
                 cargo_hash=FAKE_HASH,
             )
-            run("nix", "flake", "update", *INPUTS_TO_UPDATE, capture=False)
 
             cargo_hash = resolve_cargo_hash(
                 version=latest_version,
@@ -550,7 +548,6 @@ def main() -> int:
         print(f"  src hash:       {src_hash}")
 
         if recovery_state == "resolve-cargo":
-            run("nix", "flake", "update", *INPUTS_TO_UPDATE, capture=False)
             cargo_hash = resolve_cargo_hash(
                 version=latest_version,
                 src_rev=latest_rev,
