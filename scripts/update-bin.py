@@ -178,15 +178,17 @@ def require_clean_git_tree() -> None:
         )
 
 
-def run_omp_bin_isolated(*args: str) -> None:
+def run_omp_bin_isolated(*args: str) -> str:
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix="oh-my-pi-bin-smoke-", dir=TMP_ROOT) as temp_dir:
+    with tempfile.TemporaryDirectory(
+        prefix="oh-my-pi-bin-smoke-", dir=TMP_ROOT
+    ) as temp_dir:
         temp_path = Path(temp_dir)
         home = temp_path / "home"
         xdg_data_home = temp_path / "xdg-data"
         home.mkdir()
         (xdg_data_home / "omp").mkdir(parents=True)
-        run(
+        return run(
             "./result/bin/omp",
             *args,
             env={
@@ -194,13 +196,18 @@ def run_omp_bin_isolated(*args: str) -> None:
                 "HOME": str(home),
                 "XDG_DATA_HOME": str(xdg_data_home),
             },
-            capture=False,
         )
+
+
+def verify_smoke_test() -> None:
+    output = run_omp_bin_isolated("--smoke-test")
+    if output != "smoke-test: ok":
+        raise SystemExit(f"unexpected smoke test output: {output!r}")
 
 
 def verify_build() -> None:
     run("nix", "build", ".#oh-my-pi-bin", capture=False)
-    run_omp_bin_isolated("--version")
+    verify_smoke_test()
 
 
 def stage_and_commit(tag: str) -> None:

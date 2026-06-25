@@ -216,7 +216,11 @@
           runHook preInstallCheck
 
           ${installCheckEnvironment}
-          "$out/bin/omp" --smoke-test
+          smoke_output=$("$out/bin/omp" --smoke-test)
+          if [ "$smoke_output" != "smoke-test: ok" ]; then
+            echo "unexpected smoke test output: $smoke_output"
+            exit 1
+          fi
 
           test -x "$out/lib/omp/pi_natives.linux-x64-baseline.node"
           test -x "$out/lib/omp/pi_natives.linux-x64-modern.node"
@@ -281,7 +285,11 @@
           runHook preInstallCheck
 
           ${installCheckEnvironment}
-          "$out/bin/omp" --version
+          smoke_output=$("$out/bin/omp" --smoke-test)
+          if [ "$smoke_output" != "smoke-test: ok" ]; then
+            echo "unexpected smoke test output: $smoke_output"
+            exit 1
+          fi
 
           runHook postInstallCheck
         '';

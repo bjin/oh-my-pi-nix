@@ -54,7 +54,7 @@ def stage_and_commit() -> None:
     run("git", "commit", "-m", "Update flake inputs", capture=False)
 
 
-def run_omp_isolated(omp_binary: Path, *args: str) -> None:
+def run_omp_isolated(omp_binary: Path, *args: str) -> str:
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix="oh-my-pi-deps-smoke-", dir=TMP_ROOT
@@ -64,7 +64,7 @@ def run_omp_isolated(omp_binary: Path, *args: str) -> None:
         xdg_data_home = temp_path / "xdg-data"
         home.mkdir()
         (xdg_data_home / "omp").mkdir(parents=True)
-        run(
+        return run(
             str(omp_binary),
             *args,
             env={
@@ -72,7 +72,14 @@ def run_omp_isolated(omp_binary: Path, *args: str) -> None:
                 "HOME": str(home),
                 "XDG_DATA_HOME": str(xdg_data_home),
             },
-            capture=False,
+        )
+
+
+def verify_smoke_test(package: str, omp_binary: Path) -> None:
+    output = run_omp_isolated(omp_binary, "--smoke-test")
+    if output != "smoke-test: ok":
+        raise SystemExit(
+            f"{package} smoke test returned unexpected output: {output!r}"
         )
 
 
@@ -87,8 +94,7 @@ def verify_package(package: str) -> None:
         capture=False,
     )
     omp_binary = out_link / "bin" / "omp"
-    run_omp_isolated(omp_binary, "--version")
-    run_omp_isolated(omp_binary, "grep", "oh-my-pi", ".")
+    verify_smoke_test(package, omp_binary)
 
 
 def verify_builds() -> None:

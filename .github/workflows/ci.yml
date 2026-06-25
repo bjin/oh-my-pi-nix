@@ -42,11 +42,14 @@ jobs:
       - name: Build package
         run: 'nix build ".#${{ matrix.package.attr }}" --out-link "${{ matrix.package.out_link }}"'
 
-      - name: Print version
-        run: '"./${{ matrix.package.out_link }}/bin/omp" --version'
-
-      - name: Smoke test grep command
-        run: '"./${{ matrix.package.out_link }}/bin/omp" grep oh-my-pi .'
+      - name: Smoke test package
+        run: |
+          set -euo pipefail
+          output=$("./${{ matrix.package.out_link }}/bin/omp" --smoke-test)
+          if [ "$output" != 'smoke-test: ok' ]; then
+            echo "Unexpected smoke test output: $output" >&2
+            exit 1
+          fi
 
       - name: Upload package to Cachix
         if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CACHIX_CACHE_NAME != ''

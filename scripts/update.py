@@ -416,7 +416,7 @@ def resolve_bun_hash(
     return bun_hash
 
 
-def run_omp_isolated(*args: str) -> None:
+def run_omp_isolated(*args: str) -> str:
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix="oh-my-pi-smoke-", dir=TMP_ROOT
@@ -426,7 +426,7 @@ def run_omp_isolated(*args: str) -> None:
         xdg_data_home = temp_path / "xdg-data"
         home.mkdir()
         (xdg_data_home / "omp").mkdir(parents=True)
-        run(
+        return run(
             "./result/bin/omp",
             *args,
             env={
@@ -434,8 +434,13 @@ def run_omp_isolated(*args: str) -> None:
                 "HOME": str(home),
                 "XDG_DATA_HOME": str(xdg_data_home),
             },
-            capture=False,
         )
+
+
+def verify_smoke_test() -> None:
+    output = run_omp_isolated("--smoke-test")
+    if output != "smoke-test: ok":
+        raise SystemExit(f"unexpected smoke test output: {output!r}")
 
 
 def verify_no_embedded_native_addons() -> None:
@@ -457,9 +462,8 @@ def verify_no_embedded_native_addons() -> None:
 def verify_build() -> None:
     run("nix", "fmt", "flake.nix", capture=False)
     run("nix", "build", ".", capture=False)
-    run_omp_isolated("--version")
+    verify_smoke_test()
     verify_no_embedded_native_addons()
-    run_omp_isolated("grep", "oh-my-pi", ".")
 
 
 def stage_and_commit(tag: str) -> None:
