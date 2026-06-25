@@ -78,12 +78,36 @@ jobs:
         id: base
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
+      - name: Record oh-my-pi-bin base commit
+        id: bin_base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Update oh-my-pi-bin
         id: update_bin
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/update-bin.py
+
+      - name: Upload oh-my-pi-bin build to Cachix
+        if: steps.update_bin.outcome == 'success' && vars.CACHIX_CACHE_NAME != ''
+        env:
+          BEFORE_SHA: ${{ steps.bin_base.outputs.sha }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" = "$BEFORE_SHA" ]; then
+            echo "oh-my-pi-bin did not change; skipping Cachix upload."
+            exit 0
+          fi
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "CACHIX_AUTH_TOKEN is not configured; skipping Cachix upload."
+            exit 0
+          fi
+
+          cachix authtoken "$CACHIX_AUTH_TOKEN"
+          readlink -f result | cachix push "$CACHIX_CACHE_NAME"
 
       - name: Clean failed oh-my-pi-bin update
         if: steps.update_bin.outcome == 'failure'
@@ -92,10 +116,34 @@ jobs:
           git reset --hard HEAD
           git clean -fd
 
+      - name: Record oh-my-pi base commit
+        id: source_base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
       - name: Update oh-my-pi
         id: update_source
         continue-on-error: true
         run: scripts/update.py
+
+      - name: Upload oh-my-pi build to Cachix
+        if: steps.update_source.outcome == 'success' && vars.CACHIX_CACHE_NAME != ''
+        env:
+          BEFORE_SHA: ${{ steps.source_base.outputs.sha }}
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" = "$BEFORE_SHA" ]; then
+            echo "oh-my-pi did not change; skipping Cachix upload."
+            exit 0
+          fi
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "CACHIX_AUTH_TOKEN is not configured; skipping Cachix upload."
+            exit 0
+          fi
+
+          cachix authtoken "$CACHIX_AUTH_TOKEN"
+          readlink -f result | cachix push "$CACHIX_CACHE_NAME"
 
       - name: Clean failed oh-my-pi update
         if: steps.update_source.outcome == 'failure'
