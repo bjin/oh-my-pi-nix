@@ -41,7 +41,7 @@ jobs:
 
           ssh-keyscan -t ed25519 github.com > ~/.ssh/github_known_hosts
           github_fingerprint=$(ssh-keygen -lf ~/.ssh/github_known_hosts -E sha256 | awk '{print $2}')
-          if [ "$github_fingerprint" != 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr1UvCOqU' ]; then
+          if [ "$github_fingerprint" != 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU' ]; then
             echo "Unexpected github.com SSH host key fingerprint: $github_fingerprint" >&2
             exit 1
           fi
