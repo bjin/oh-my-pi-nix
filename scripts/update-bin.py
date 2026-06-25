@@ -50,13 +50,15 @@ def normalize_tag(raw_version: str) -> str:
 
 
 def request_json(url: str) -> dict[str, Any]:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "User-Agent": "oh-my-pi-nix-update-bin",
-        },
-    )
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "User-Agent": "oh-my-pi-nix-update-bin",
+    }
+    token = os.environ.get("GITHUB_TOKEN")
+    if token and url.startswith("https://api.github.com/"):
+        headers["Authorization"] = f"Bearer {token}"
+        headers["X-GitHub-Api-Version"] = "2022-11-28"
+    request = urllib.request.Request(url, headers=headers)
     with urllib.request.urlopen(request) as response:
         payload = json.load(response)
     if not isinstance(payload, dict):

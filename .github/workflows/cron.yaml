@@ -1,0 +1,99 @@
+name: Cron updater
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "56 * * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: cron-updater-master
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Update upstream releases
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out master
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install deploy key
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$DEPLOY_KEY" ]; then
+            echo "DEPLOY_KEY secret is not configured." >&2
+            exit 1
+          fi
+
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+          ssh-keyscan -t ed25519 github.com > ~/.ssh/github_known_hosts
+          github_fingerprint=$(ssh-keygen -lf ~/.ssh/github_known_hosts -E sha256 | awk '{print $2}')
+          if [ "$github_fingerprint" != 'SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr1UvCOqU' ]; then
+            echo "Unexpected github.com SSH host key fingerprint: $github_fingerprint" >&2
+            exit 1
+          fi
+          cat ~/.ssh/github_known_hosts >> ~/.ssh/known_hosts
+
+          {
+            echo 'Host github.com'
+            echo '  HostName github.com'
+            echo '  User git'
+            echo '  IdentityFile ~/.ssh/deploy_key'
+            echo '  IdentitiesOnly yes'
+          } > ~/.ssh/config
+
+          git remote set-url origin "git@github.com:${GITHUB_REPOSITORY}.git"
+
+      - name: Configure git identity
+        run: |
+          set -euo pipefail
+          git config user.name 'Bin Jin'
+          git config user.email 'bjin@protonmail.com'
+          git config commit.gpgsign false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+
+      - name: Configure Cachix
+        if: vars.CACHIX_CACHE_NAME != ''
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ vars.CACHIX_CACHE_NAME }}
+          skipPush: true
+
+      - name: Record starting commit
+        id: base
+        run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Update oh-my-pi-bin
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: scripts/update-bin.py
+
+      - name: Update oh-my-pi
+        run: scripts/update.py
+
+      - name: Push generated commits
+        env:
+          BASE_SHA: ${{ steps.base.outputs.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$(git rev-parse HEAD)" = "$BASE_SHA" ]; then
+            echo "No upstream updates produced commits."
+            exit 0
+          fi
+
+          git push origin HEAD:master
