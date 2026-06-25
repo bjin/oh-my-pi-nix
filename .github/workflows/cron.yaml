@@ -79,12 +79,30 @@ jobs:
         run: echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Update oh-my-pi-bin
+        id: update_bin
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: scripts/update-bin.py
 
+      - name: Clean failed oh-my-pi-bin update
+        if: steps.update_bin.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          git clean -fd
+
       - name: Update oh-my-pi
+        id: update_source
+        continue-on-error: true
         run: scripts/update.py
+
+      - name: Clean failed oh-my-pi update
+        if: steps.update_source.outcome == 'failure'
+        run: |
+          set -euo pipefail
+          git reset --hard HEAD
+          git clean -fd
 
       - name: Push generated commits
         env:
@@ -97,3 +115,13 @@ jobs:
           fi
 
           git push origin HEAD:master
+
+      - name: Report updater failures
+        if: steps.update_bin.outcome == 'failure' || steps.update_source.outcome == 'failure'
+        env:
+          UPDATE_BIN_OUTCOME: ${{ steps.update_bin.outcome }}
+          UPDATE_SOURCE_OUTCOME: ${{ steps.update_source.outcome }}
+        run: |
+          echo "Update oh-my-pi-bin outcome: $UPDATE_BIN_OUTCOME" >&2
+          echo "Update oh-my-pi outcome: $UPDATE_SOURCE_OUTCOME" >&2
+          exit 1
