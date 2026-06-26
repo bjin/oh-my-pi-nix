@@ -36,6 +36,28 @@
         export XDG_DATA_HOME="$TMPDIR/check-xdg-data"
         mkdir -p "$HOME" "$XDG_DATA_HOME/omp"
       '';
+      installShellCompletions = ''
+        completion_dir="$TMPDIR/completions"
+        completion_runtime_dir="$TMPDIR/completion-runtime"
+        rm -rf "$completion_dir" "$completion_runtime_dir"
+        mkdir -p "$completion_dir" "$completion_runtime_dir/home" "$completion_runtime_dir/xdg"
+
+        HOME="$completion_runtime_dir/home" XDG_DATA_HOME="$completion_runtime_dir/xdg" \
+          "$out/bin/omp" completions bash > "$completion_dir/omp.bash"
+        HOME="$completion_runtime_dir/home" XDG_DATA_HOME="$completion_runtime_dir/xdg" \
+          "$out/bin/omp" completions zsh > "$completion_dir/_omp"
+        HOME="$completion_runtime_dir/home" XDG_DATA_HOME="$completion_runtime_dir/xdg" \
+          "$out/bin/omp" completions fish > "$completion_dir/omp.fish"
+
+        installShellCompletion --bash --name omp "$completion_dir/omp.bash"
+        installShellCompletion --zsh --name _omp "$completion_dir/_omp"
+        installShellCompletion --fish --name omp.fish "$completion_dir/omp.fish"
+      '';
+      installCheckCompletions = ''
+        test -s "$out/share/bash-completion/completions/omp"
+        test -s "$out/share/zsh/site-functions/_omp"
+        test -s "$out/share/fish/vendor_completions.d/omp.fish"
+      '';
       relaxBunEngine = ''
         # Relax engines.bun to match the bun used for compilation. Upstream may
         # require a newer bun than nixpkgs carries, but the generated CLI runs
@@ -166,6 +188,7 @@
           pkgs.bun
           pkgs.biome
           pkgs.makeWrapper
+          pkgs.installShellFiles
           pkgs.pkg-config
           toolchainWithTarget
           rustPlatform.cargoSetupHook
@@ -223,6 +246,13 @@
           runHook postInstall
         '';
 
+        preFixup = ''
+          installShellCompletionsHook() {
+            ${installShellCompletions}
+          }
+          postFixupHooks+=(installShellCompletionsHook)
+        '';
+
         doInstallCheck = true;
         installCheckPhase = ''
           runHook preInstallCheck
@@ -233,6 +263,8 @@
             echo "unexpected smoke test output: $smoke_output"
             exit 1
           fi
+
+          ${installCheckCompletions}
 
           test -x "$out/lib/omp/pi_natives.linux-x64-baseline.node"
           test -x "$out/lib/omp/pi_natives.linux-x64-modern.node"
@@ -270,6 +302,7 @@
         nativeBuildInputs = [
           pkgs.autoPatchelfHook
           pkgs.makeWrapper
+          pkgs.installShellFiles
         ];
         buildInputs = [
           pkgs.stdenv.cc.cc.lib
@@ -292,6 +325,13 @@
           runHook postInstall
         '';
 
+        preFixup = ''
+          installShellCompletionsHook() {
+            ${installShellCompletions}
+          }
+          postFixupHooks+=(installShellCompletionsHook)
+        '';
+
         doInstallCheck = true;
         installCheckPhase = ''
           runHook preInstallCheck
@@ -302,6 +342,8 @@
             echo "unexpected smoke test output: $smoke_output"
             exit 1
           fi
+
+          ${installCheckCompletions}
 
           runHook postInstallCheck
         '';
