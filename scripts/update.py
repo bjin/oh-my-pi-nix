@@ -105,8 +105,19 @@ def git_changed_paths_vs_head() -> set[str]:
     return paths
 
 
-def get_recovery_state(hashes: dict[str, str]) -> str | None:
+def get_recoverable_changed_paths() -> set[str]:
     changed_paths = git_changed_paths_vs_head()
+    unexpected_paths = changed_paths - RECOVERABLE_CHANGED_PATHS
+    if unexpected_paths:
+        formatted = ", ".join(sorted(unexpected_paths))
+        raise SystemExit(
+            f"working tree has unrelated changes; commit or stash before running update.py: {formatted}"
+        )
+    return changed_paths
+
+
+def get_recovery_state(hashes: dict[str, str]) -> str | None:
+    changed_paths = get_recoverable_changed_paths()
     if not changed_paths:
         if hashes["bunHash"] == FAKE_HASH or hashes["cargoHash"] == FAKE_HASH:
             raise SystemExit(
@@ -114,12 +125,6 @@ def get_recovery_state(hashes: dict[str, str]) -> str | None:
             )
         return None
 
-    unexpected_paths = changed_paths - RECOVERABLE_CHANGED_PATHS
-    if unexpected_paths:
-        formatted = ", ".join(sorted(unexpected_paths))
-        raise SystemExit(
-            f"working tree has unrelated changes; commit or stash before running update.py: {formatted}"
-        )
 
     if "hashes.json" not in changed_paths:
         raise SystemExit(
@@ -198,6 +203,15 @@ def normalize_tag(raw_version: str) -> str:
 
 def require_upstream_tag(tag: str) -> str:
     return resolve_tag_revision(tag)
+
+
+def resolve_target_tag(raw_version: str | None) -> tuple[str, str, str]:
+    if raw_version:
+        tag = normalize_tag(raw_version)
+        rev = require_upstream_tag(tag)
+    else:
+        tag, rev = get_latest_tag()
+    return tag, tag.removeprefix("v"), rev
 
 
 def checkout_source(tag: str, rev: str, workdir: Path) -> Path:
@@ -466,9 +480,16 @@ def verify_build() -> None:
     verify_no_embedded_native_addons()
 
 
-def stage_and_commit(tag: str) -> None:
+def commit_message(tag: str, version: str, src_rev: str) -> str:
+    head_hashes = read_head_hashes()
+    if version == head_hashes["version"] and src_rev != head_hashes["srcRev"]:
+        return f"Update oh-my-pi {tag} source revision to {src_rev[:12]}"
+    return f"Update oh-my-pi to {tag}"
+
+
+def stage_and_commit(tag: str, version: str, src_rev: str) -> None:
     run("git", "add", "flake.nix", "flake.lock", "hashes.json", capture=False)
-    run("git", "commit", "-m", f"Update oh-my-pi to {tag}", capture=False)
+    run("git", "commit", "-m", commit_message(tag, version, src_rev), capture=False)
 
 
 def main() -> int:
@@ -482,16 +503,22 @@ def main() -> int:
     args = parser.parse_args()
 
     hashes = read_hashes()
-    recovery_state = get_recovery_state(hashes)
+    latest_tag, latest_version, latest_rev = resolve_target_tag(args.version)
+
+    same_version_moved = (
+        latest_version == hashes["version"] and latest_rev != hashes["srcRev"]
+    )
+    if same_version_moved:
+        get_recoverable_changed_paths()
+        recovery_state = None
+        print(
+            f"Upstream tag {latest_tag} moved from {hashes['srcRev']} "
+            f"to {latest_rev}; restarting update"
+        )
+    else:
+        recovery_state = get_recovery_state(hashes)
 
     if recovery_state is None:
-        if args.version:
-            latest_tag = normalize_tag(args.version)
-            latest_rev = require_upstream_tag(latest_tag)
-        else:
-            latest_tag, latest_rev = get_latest_tag()
-        latest_version = latest_tag.removeprefix("v")
-
         if latest_version == hashes["version"] and latest_rev == hashes["srcRev"]:
             print(f"Already up to date at {latest_tag} ({latest_rev})")
             return 0
@@ -572,7 +599,7 @@ def main() -> int:
     print(f"  cargo hash:     {cargo_hash}")
     print(f"  bun hash:       {bun_hash}")
     verify_build()
-    stage_and_commit(latest_tag)
+    stage_and_commit(latest_tag, latest_version, latest_rev)
     print(f"Committed update for {latest_tag}. Review locally, then push when ready.")
     return 0
 
