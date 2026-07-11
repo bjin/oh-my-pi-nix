@@ -74,16 +74,6 @@
           --replace-fail 'const reset = process.argv.includes("--reset");' \
             'const reset = true;'
       '';
-      useNixBiomeFormatter = ''
-        # v16.1.19 invokes Biome while generating the legacy pi registry. Use
-        # the Nix-packaged Biome instead of the npm CLI binary, and normalize the
-        # upstream config key that Biome 2.4.16 rejects.
-        substituteInPlace biome.json \
-          --replace-fail '"preset": "recommended",' '"recommended": true,'
-        substituteInPlace packages/coding-agent/scripts/generate-legacy-pi-bundled-registry.ts \
-          --replace-fail '["bunx", "biome", "check", "--write", ...targets]' \
-            '["${pkgs.biome}/bin/biome", "check", "--write", ...targets]'
-      '';
       commonMeta = {
         description = "AI coding agent for the terminal";
         homepage = "https://github.com/can1357/oh-my-pi";
@@ -183,7 +173,6 @@
         nativeBuildInputs = [
           pkgs.autoPatchelfHook
           pkgs.bun
-          pkgs.biome
           pkgs.makeWrapper
           pkgs.installShellFiles
           pkgs.pkg-config
@@ -200,7 +189,6 @@
         postPatch = ''
           ${relaxBunEngine}
           ${useLooseNativeAddons}
-          ${useNixBiomeFormatter}
         '';
 
         buildPhase = ''
