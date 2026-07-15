@@ -11,14 +11,14 @@ permissions:
 
 jobs:
   dispatch:
-    name: Trigger bjin/oh-my-pi-bin-updater
+    name: Trigger update-oh-my-pi of repo bjin/omp-aur-updater
     runs-on: ubuntu-latest
 
     steps:
       - name: Dispatch updater workflow
         env:
           GH_TOKEN: ${{ secrets.AUR_UPDATER_DISPATCH_TOKEN }}
-          TARGET_REPOSITORY: bjin/oh-my-pi-bin-updater
+          TARGET_REPOSITORY: bjin/omp-aur-updater
           EVENT_TYPE: oh-my-pi-nix-master
         run: |
           set -euo pipefail
