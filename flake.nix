@@ -173,18 +173,28 @@
         nativeBuildInputs = [
           pkgs.autoPatchelfHook
           pkgs.bun
+          # `audiopus_sys` builds its vendored static libopus fallback with CMake.
+          pkgs.cmake
           pkgs.makeWrapper
           pkgs.installShellFiles
           pkgs.pkg-config
           toolchainWithTarget
           rustPlatform.cargoSetupHook
+          # `maudio-sys` generates bindings with libclang; this hook also provides
+          # its Nix libc include flags.
+          rustPlatform.bindgenHook
         ];
 
         buildInputs = [
           pkgs.stdenv.cc.cc.lib
+          # `audiopus_sys` enables its `static` feature; pkg-config locates this
+          # libopus archive instead of falling back to the bundled CMake build.
+          pkgs.opus
           pkgs.zlib
         ];
         strictDeps = true;
+        # CMake belongs to `audiopus_sys`, not this derivation's source root.
+        dontUseCmakeConfigure = true;
         dontStrip = true;
         postPatch = ''
           ${relaxBunEngine}
@@ -200,7 +210,6 @@
           export CARGO_TARGET_DIR="$TMPDIR/cargo-target"
           mkdir -p "$HOME" "$XDG_CACHE_HOME" "$BUN_INSTALL_CACHE_DIR" "$CARGO_TARGET_DIR"
           export LD_LIBRARY_PATH="${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]}"
-          export LIBCLANG_PATH="${pkgs.libclang.lib}/lib"
 
           cp -a ${bunDeps}/node_modules ./node_modules
           chmod -R u+w ./node_modules
