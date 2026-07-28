@@ -86,6 +86,48 @@
       sourceRev = sourceData.srcRev;
       rustToolchainChannel = "nightly-2026-04-29";
       rustTarget = "x86_64-unknown-linux-gnu";
+      # Upstream drives the shipping addons through Bazel since 17.1.6, but the
+      # rule (upstream `bazel/defs.bzl`, `crates/pi-natives/BUILD.bazel`) only
+      # compiles the `pi_natives` cdylib at opt/thin-LTO/cgu=16/strip-symbols —
+      # exactly the cargo `ci` profile — with a per-variant `-Ctarget-cpu` floor,
+      # then renames it to the loader's canonical filename. Cargo covers that, so
+      # the build stays Bazel-free. The napi CLI is not needed either:
+      # `packages/natives/native/index.{js,d.ts}` are committed and regenerated
+      # only when the Rust API changes.
+      nativeAddonVariants = {
+        baseline = "x86-64-v2";
+        modern = "x86-64-v3";
+      };
+      nativeAddonFile = variant: "pi_natives.linux-x64-${variant}.node";
+      buildNativeAddons = ''
+        # pcre2-sys links a pkg-config libpcre2 when it finds one; upstream
+        # release builds force the vendored static build instead.
+        export PCRE2_SYS_STATIC=1
+        # `audiopus_sys`' bundled opus fallback declares a
+        # cmake_minimum_required below what CMake 4.x accepts unaided.
+        export CMAKE_POLICY_VERSION_MINIMUM=3.5
+      ''
+      + lib.concatStrings (
+        lib.mapAttrsToList (variant: targetCpu: ''
+
+          echo "Building pi_natives addon: ${variant} (-Ctarget-cpu=${targetCpu})"
+          RUSTFLAGS="-C target-cpu=${targetCpu}" \
+            cargo build --offline --profile ci --package pi-natives --target ${rustTarget}
+          install -Dm755 "$CARGO_TARGET_DIR/${rustTarget}/ci/libpi_natives.so" \
+            "packages/natives/native/${nativeAddonFile variant}"
+        '') nativeAddonVariants
+      );
+      installNativeAddons = lib.concatStrings (
+        lib.mapAttrsToList (variant: _: ''
+          install -Dm755 "packages/natives/native/${nativeAddonFile variant}" \
+            "$out/lib/omp/${nativeAddonFile variant}"
+        '') nativeAddonVariants
+      );
+      checkNativeAddons = lib.concatStrings (
+        lib.mapAttrsToList (variant: _: ''
+          test -x "$out/lib/omp/${nativeAddonFile variant}"
+        '') nativeAddonVariants
+      );
       sourceSrc = pkgs.fetchgit {
         url = "https://github.com/can1357/oh-my-pi.git";
         rev = sourceRev;
@@ -213,10 +255,8 @@
 
           cp -a ${bunDeps}/node_modules ./node_modules
           chmod -R u+w ./node_modules
-          substituteInPlace node_modules/@napi-rs/cli/dist/cli.js \
-            --replace-fail '#!/usr/bin/env node' '#!${pkgs.bun}/bin/bun'
+          ${buildNativeAddons}
 
-          CI=1 TARGET_VARIANTS="baseline modern" bun run ci:build:native
           bun --cwd=packages/coding-agent run build
 
           runHook postBuild
@@ -226,10 +266,7 @@
           runHook preInstall
 
           install -Dm755 packages/coding-agent/dist/omp "$out/lib/omp/omp"
-          install -Dm755 packages/natives/native/pi_natives.linux-x64-baseline.node \
-            "$out/lib/omp/pi_natives.linux-x64-baseline.node"
-          install -Dm755 packages/natives/native/pi_natives.linux-x64-modern.node \
-            "$out/lib/omp/pi_natives.linux-x64-modern.node"
+          ${installNativeAddons}
           makeWrapper "$out/lib/omp/omp" "$out/bin/omp" \
             --set PI_SKIP_VERSION_CHECK 1 \
             --prefix LD_LIBRARY_PATH : "${runtimeLibraryPath}"
@@ -258,8 +295,7 @@
 
           ${installCheckCompletions}
 
-          test -x "$out/lib/omp/pi_natives.linux-x64-baseline.node"
-          test -x "$out/lib/omp/pi_natives.linux-x64-modern.node"
+          ${checkNativeAddons}
           if [ -e "$XDG_DATA_HOME/omp/natives" ] || [ -e "$HOME/.omp/natives" ]; then
             echo "omp wrote native addons to a user cache"
             exit 1
