@@ -84,7 +84,7 @@
 
       sourceVersion = sourceData.version;
       sourceRev = sourceData.srcRev;
-      rustToolchainChannel = "nightly-2026-04-29";
+      rustToolchainChannel = "nightly-2026-07-28";
       rustTarget = "x86_64-unknown-linux-gnu";
       # Upstream drives the shipping addons through Bazel since 17.1.6, but the
       # rule (upstream `bazel/defs.bzl`, `crates/pi-natives/BUILD.bazel`) only
