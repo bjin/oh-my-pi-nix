@@ -292,6 +292,10 @@
             echo "unexpected smoke test output: $smoke_output"
             exit 1
           fi
+          # This fixture clears `omp read`'s summary gate and reaches the
+          # tree-sitter-haskell allocation path that previously corrupted the heap.
+          "$out/bin/omp" read ${./Crash.hs} > "$TMPDIR/haskell-crash-regression"
+          test -s "$TMPDIR/haskell-crash-regression"
 
           ${installCheckCompletions}
 
