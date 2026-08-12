@@ -57,6 +57,13 @@ jobs:
             echo "Haskell crash regression produced no output" >&2
             exit 1
           fi
+          bun_runtime=$(BUN_BE_BUN=1 "./${{ matrix.package.out_link }}/bin/omp" \
+            -e 'console.log(`${Bun.version} ${typeof Bun.Image}`)')
+          if [ "${bun_runtime##* }" != 'function' ]; then
+            echo "Embedded Bun runtime lacks Bun.Image: $bun_runtime" >&2
+            exit 1
+          fi
+          echo "Embedded Bun runtime: $bun_runtime"
 
       - name: Upload package to Cachix
         if: github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CACHIX_CACHE_NAME != ''

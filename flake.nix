@@ -58,12 +58,29 @@
         test -s "$out/share/zsh/site-functions/_omp"
         test -s "$out/share/fish/vendor_completions.d/omp.fish"
       '';
-      relaxBunEngine = ''
-        # Relax engines.bun to match the bun used for compilation. Upstream may
-        # require a newer bun than nixpkgs carries, but the generated CLI runs
-        # correctly with the compiler's embedded runtime.
-        sed -i 's/"bun": ">=[0-9.]*"/"bun": ">='"$(bun --version)"'"/' \
-          packages/utils/package.json
+      # Two upstream constraints collide with nixpkgs' bun: upstream needs a Bun
+      # runtime newer than nixpkgs carries (engines.bun, enforced at startup by
+      # `cli.ts` and relied on unguarded by every `Bun.Image` caller), and Bun's
+      # standalone writer corrupts patchelf'd templates until oven-sh/bun#31024
+      # ships (oven-sh/bun#31023). Compile with nixpkgs' bun, but write the
+      # payload into the pristine upstream release binary: the shipped runtime is
+      # then exactly the one upstream targets, and the writer never sees a
+      # patched template. Drop once nixpkgs' bun both satisfies engines.bun and
+      # carries oven-sh/bun#31024.
+      useBunExecutableTemplate = ''
+        requiredBun="$(sed -n 's/.*"bun":[[:space:]]*">=\([0-9.]*\)".*/\1/p' packages/utils/package.json)"
+        if [ -z "$requiredBun" ]; then
+          echo "could not parse engines.bun from packages/utils/package.json" >&2
+          exit 1
+        fi
+        if [ "$(printf '%s\n%s\n' "$requiredBun" "${bunTemplateVersion}" | sort -V | head -n1)" != "$requiredBun" ]; then
+          echo "upstream requires bun >=$requiredBun, pinned template is ${bunTemplateVersion}" >&2
+          exit 1
+        fi
+
+        substituteInPlace packages/coding-agent/scripts/compile-binary.ts \
+          --replace-fail '...(options.target ? { target: options.target } : {}),' \
+            'executablePath: "${bunTemplate}/bin/bun",'
       '';
       useLooseNativeAddons = ''
         # Nix ships native addons as loose .node files next to the compiled
@@ -165,6 +182,36 @@
         rustc = toolchainWithTarget;
       };
 
+      # Pristine upstream Bun release, used only as the standalone runtime
+      # template. `useBunExecutableTemplate` fails the build if this drifts below
+      # upstream's engines.bun floor.
+      bunTemplateVersion = "1.3.14";
+      bunTemplate = pkgs.stdenvNoCC.mkDerivation {
+        pname = "bun-executable-template";
+        version = bunTemplateVersion;
+        src = pkgs.fetchurl {
+          url = "https://github.com/oven-sh/bun/releases/download/bun-v${bunTemplateVersion}/bun-linux-x64.zip";
+          hash = "sha256-lR7iruhV8IWVruxiJSJqKY0/6oOj3NZGXAnLzN9+hI8=";
+        };
+        sourceRoot = "bun-linux-x64";
+
+        nativeBuildInputs = [ pkgs.unzip ];
+        strictDeps = true;
+        dontConfigure = true;
+        dontBuild = true;
+        # Any patchelf/strip pass here reintroduces oven-sh/bun#31023: the writer
+        # must see the release binary byte for byte.
+        dontFixup = true;
+
+        installPhase = ''
+          runHook preInstall
+
+          install -Dm755 bun "$out/bin/bun"
+
+          runHook postInstall
+        '';
+      };
+
       bunDeps = pkgs.stdenvNoCC.mkDerivation {
         name = "${pname}-${sourceVersion}-bun-deps";
         src = sourceSrc;
@@ -173,7 +220,6 @@
         strictDeps = true;
         dontConfigure = true;
         dontFixup = true;
-        postPatch = relaxBunEngine;
         impureEnvVars = lib.fetchers.proxyImpureEnvVars;
 
         buildPhase = ''
@@ -239,7 +285,7 @@
         dontUseCmakeConfigure = true;
         dontStrip = true;
         postPatch = ''
-          ${relaxBunEngine}
+          ${useBunExecutableTemplate}
           ${useLooseNativeAddons}
         '';
 
@@ -305,7 +351,12 @@
         '';
 
         passthru = {
-          inherit bunDeps cargoDeps toolchainWithTarget;
+          inherit
+            bunDeps
+            bunTemplate
+            cargoDeps
+            toolchainWithTarget
+            ;
         };
 
         meta = commonMeta;

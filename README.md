@@ -50,6 +50,8 @@ python3 scripts/update.py
 
 This updates the packaged upstream release, refreshes the hashes and lock data needed for the build, verifies with `nix build .`, and creates a local commit.
 
+`flake.nix` pins `bunTemplateVersion`, the pristine upstream Bun release the standalone binary is written into. nixpkgs' bun is older than upstream's `engines.bun`, and Bun's standalone writer corrupts patchelf'd templates ([oven-sh/bun#31023](https://github.com/oven-sh/bun/issues/31023)), so the build compiles with nixpkgs' bun and emits into that unmodified release binary. When upstream raises `engines.bun`, the build fails with the required version: bump `bunTemplateVersion` and its `hash`. The whole mechanism can be dropped once nixpkgs' bun both satisfies `engines.bun` and carries [oven-sh/bun#31024](https://github.com/oven-sh/bun/pull/31024).
+
 Bump the upstream binary `oh-my-pi-bin` package to the latest release:
 
 ```bash

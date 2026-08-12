@@ -430,7 +430,7 @@ def resolve_bun_hash(
     return bun_hash
 
 
-def run_omp_isolated(*args: str) -> str:
+def run_omp_isolated(*args: str, extra_env: dict[str, str] | None = None) -> str:
     TMP_ROOT.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix="oh-my-pi-smoke-", dir=TMP_ROOT
@@ -445,6 +445,7 @@ def run_omp_isolated(*args: str) -> str:
             *args,
             env={
                 **os.environ,
+                **(extra_env or {}),
                 "HOME": str(home),
                 "XDG_DATA_HOME": str(xdg_data_home),
             },
@@ -457,11 +458,27 @@ def verify_haskell_crash_regression() -> None:
         raise SystemExit("Haskell crash regression produced no output")
 
 
+def verify_embedded_bun_runtime() -> None:
+    # nixpkgs' bun is older than upstream's engines.bun, so flake.nix writes the
+    # payload into a pinned pristine Bun release. Without that template the CLI
+    # still starts, but every `Bun.Image` caller (image resize, PNG conversion,
+    # kitty rendering) silently degrades.
+    output = run_omp_isolated(
+        "-e",
+        "console.log(`${Bun.version} ${typeof Bun.Image}`)",
+        extra_env={"BUN_BE_BUN": "1"},
+    )
+    version, _, image_kind = output.partition(" ")
+    if image_kind != "function":
+        raise SystemExit(f"embedded Bun {version} lacks Bun.Image")
+
+
 def verify_smoke_test() -> None:
     output = run_omp_isolated("--smoke-test")
     if output != "smoke-test: ok":
         raise SystemExit(f"unexpected smoke test output: {output!r}")
     verify_haskell_crash_regression()
+    verify_embedded_bun_runtime()
 
 
 def verify_no_embedded_native_addons() -> None:
