@@ -123,16 +123,14 @@ jobs:
     steps:
       # No checkout: this job builds upstream's own flake, straight from the
       # release tag. Nothing in this repository takes part in the build.
+
+      # Upstream's flake declares nix-community as a substituter in `nixConfig`,
+      # which Nix ignores without `accept-flake-config`, and it is not worth
+      # configuring here either: bun2nix follows upstream's own nixpkgs pin, so
+      # its store paths can never match what nix-community cached. A cold run
+      # substituted nothing from it and built bun2nix locally in ~2 minutes.
       - name: Install Nix
         uses: cachix/install-nix-action@v31
-        with:
-          # Upstream's flake declares this substituter in `nixConfig`, which
-          # only applies with `accept-flake-config`. Configure it here instead
-          # of trusting whatever the fetched tree asks for; without it, bun2nix
-          # and its Rust closure are built from source.
-          extra_nix_config: |
-            extra-substituters = https://nix-community.cachix.org
-            extra-trusted-public-keys = nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
 
       # Before the build, so an already-cached release substitutes instead of
       # rebuilding: a re-run, a manual run, or a force push that loses the
