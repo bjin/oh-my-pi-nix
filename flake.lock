@@ -83,17 +83,17 @@
     "oh-my-pi": {
       "flake": false,
       "locked": {
-        "lastModified": 1786603655,
-        "narHash": "sha256-GvzeVpyAfQ7Vh5Bd5eOCv5FOzmfHACfZZS7Xh+dF/lQ=",
+        "lastModified": 1786642761,
+        "narHash": "sha256-/TtQ+UKm8nINnoi1Nir4HubwCL3N7RAKlU8Dtrl+MXU=",
         "owner": "can1357",
         "repo": "oh-my-pi",
-        "rev": "326d24bd40d9858e24e1036ae739c27c72eeb543",
+        "rev": "0bc2c342f411065f3e65c99e2887374e61f0fefa",
         "type": "github"
       },
       "original": {
         "owner": "can1357",
         "repo": "oh-my-pi",
-        "rev": "326d24bd40d9858e24e1036ae739c27c72eeb543",
+        "rev": "0bc2c342f411065f3e65c99e2887374e61f0fefa",
         "type": "github"
       }
     },
