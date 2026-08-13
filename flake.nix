@@ -30,6 +30,9 @@
       runtimeLibraryPath = lib.makeLibraryPath [
         pkgs.stdenv.cc.cc.lib
         pkgs.zlib
+        # `/live` requires PulseAudio at runtime.
+        pkgs.libpulseaudio
+        pkgs.pipewire
       ];
       installCheckEnvironment = ''
         export HOME="$TMPDIR/check-home"
@@ -129,7 +132,9 @@
 
           echo "Building pi_natives addon: ${variant} (-Ctarget-cpu=${targetCpu})"
           RUSTFLAGS="-C target-cpu=${targetCpu}" \
-            cargo build --offline --profile ci --package pi-natives --target ${rustTarget}
+            cargo build --offline --profile ci --package pi-natives \
+              ${lib.optionalString pkgs.stdenv.hostPlatform.isLinux "--features wayland-pipewire"} \
+              --target ${rustTarget}
           install -Dm755 "$CARGO_TARGET_DIR/${rustTarget}/ci/libpi_natives.so" \
             "packages/natives/native/${nativeAddonFile variant}"
         '') nativeAddonVariants
@@ -279,6 +284,9 @@
           # libopus archive instead of falling back to the bundled CMake build.
           pkgs.opus
           pkgs.zlib
+          # `pi-natives`' `wayland-pipewire` feature links system libpipewire
+          # through pkg-config.
+          pkgs.pipewire
         ];
         strictDeps = true;
         # CMake belongs to `audiopus_sys`, not this derivation's source root.
