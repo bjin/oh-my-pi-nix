@@ -25,9 +25,14 @@ Install the upstream binary package instead:
 nix profile add github:bjin/oh-my-pi-nix#oh-my-pi-bin
 ```
 
-After installation, `omp` will be available from your profile.
+The same cache also carries `x86_64-linux` builds of upstream's own flake, for every release this repository has picked up, so a released tag installs from upstream directly without building:
 
-The same cache also carries `x86_64-linux` builds of upstream's own flake (`github:can1357/oh-my-pi/vX.Y.Z`) for every release this repository has picked up, so installing from upstream's flake directly is prebuilt as well.
+```bash
+nix shell nixpkgs#cachix -c cachix use oh-my-pi
+nix profile add github:can1357/oh-my-pi/v17.3.0
+```
+
+After installation, `omp` will be available from your profile.
 
 ## Run without installing
 
