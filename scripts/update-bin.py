@@ -19,6 +19,16 @@ ROOT = SCRIPT_DIR.parent
 TMP_ROOT = ROOT / ".tmp"
 BIN_HASHES = ROOT / "bin-hashes.json"
 UPSTREAM_API = "https://api.github.com/repos/can1357/oh-my-pi"
+FLAKE = ROOT / "flake.nix"
+LOCK_PATH = ROOT / "flake.lock"
+SYSTEM = "x86_64-linux"
+UPSTREAM_INPUT = "oh-my-pi-upstream"
+UPSTREAM_REPO_URL = "https://github.com/can1357/oh-my-pi.git"
+# Whole-line, and scoped to the input attribute: the `oh-my-pi` source input
+# that update.py rewrites carries the same URL prefix.
+FLAKE_URL_PATTERN = (
+    r'^(\s*oh-my-pi-upstream\.url = "github:can1357/oh-my-pi/)([0-9a-f]{40})(";)$'
+)
 ASSET_BY_SYSTEM = {
     "x86_64-linux": "omp-linux-x64",
 }
@@ -47,6 +57,63 @@ def normalize_tag(raw_version: str) -> str:
     if not re.fullmatch(r"v\d+\.\d+\.\d+", tag):
         raise SystemExit(f"unexpected upstream version format: {raw_version}")
     return tag
+
+
+def resolve_tag_revision(tag: str) -> str:
+    # The release payload names the tag, not the commit under it, and a tag ref
+    # in the flake input would be re-resolved through Nix's cached GitHub ref
+    # lookup, so ask the remote (`^{}` peels an annotated tag).
+    output = run(
+        "git",
+        "ls-remote",
+        "--exit-code",
+        UPSTREAM_REPO_URL,
+        f"refs/tags/{tag}",
+        f"refs/tags/{tag}^{{}}",
+    )
+    refs: dict[str, str] = {}
+    for line in output.splitlines():
+        parts = line.split()
+        if len(parts) != 2:
+            raise SystemExit(f"unexpected upstream ref line: {line}")
+        refs[parts[1]] = parts[0]
+
+    rev = refs.get(f"refs/tags/{tag}^{{}}") or refs.get(f"refs/tags/{tag}")
+    if rev is None:
+        raise SystemExit(f"upstream tag does not exist: {tag}")
+    if not re.fullmatch(r"[0-9a-f]{40}", rev):
+        raise SystemExit(f"unexpected upstream revision for {tag}: {rev}")
+    return rev
+
+
+def read_flake_rev() -> str:
+    match = re.search(FLAKE_URL_PATTERN, FLAKE.read_text(), re.MULTILINE)
+    if match is None:
+        raise SystemExit(
+            f"could not parse the {UPSTREAM_INPUT} input commit from flake.nix"
+        )
+    return match.group(2)
+
+
+def write_flake_rev(rev: str) -> None:
+    content, count = re.subn(
+        FLAKE_URL_PATTERN,
+        lambda match: f"{match.group(1)}{rev}{match.group(3)}",
+        FLAKE.read_text(),
+        count=1,
+        flags=re.MULTILINE,
+    )
+    if count != 1:
+        raise SystemExit(
+            f"could not rewrite the {UPSTREAM_INPUT} input commit in flake.nix"
+        )
+    FLAKE.write_text(content)
+
+
+def read_locked_rev() -> str:
+    lock = json.loads(LOCK_PATH.read_text())
+    node = lock["nodes"]["root"]["inputs"][UPSTREAM_INPUT]
+    return lock["nodes"][node]["locked"]["rev"]
 
 
 def request_json(url: str) -> dict[str, Any]:
@@ -210,9 +277,38 @@ def verify_build() -> None:
     verify_smoke_test()
 
 
-def stage_and_commit(tag: str) -> None:
-    run("git", "add", "bin-hashes.json", capture=False)
-    run("git", "commit", "-m", f"Update oh-my-pi-bin to {tag}", capture=False)
+def eval_store_path(flake_ref: str, attribute: str) -> str:
+    # Not `run`: a failed evaluation carries the flake's own message — including
+    # the throw for a pin that disagrees with bin-hashes.json — and folding that
+    # into a CalledProcessError would drop it from the updater's log.
+    result = subprocess.run(
+        ["nix", "eval", "--raw", f"{flake_ref}#packages.{SYSTEM}.{attribute}.outPath"],
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            result.stderr.strip() or f"could not evaluate {flake_ref}#{attribute}"
+        )
+    return result.stdout.strip()
+
+
+def verify_upstream_pin(tag: str) -> None:
+    # `#upstream` only re-exports upstream's package, so it has to resolve to
+    # the very store path the release tag builds — the one upstream.yml pushes
+    # to Cachix. Evaluating it also forces the flake's assertion that the
+    # pinned tree is the release bin-hashes.json names. Eval only: the build
+    # itself belongs to upstream.yml, which caches it once per release.
+    ours = eval_store_path(".", "upstream")
+    theirs = eval_store_path(f"github:can1357/oh-my-pi/{tag}", "default")
+    if ours != theirs:
+        raise SystemExit(f"#upstream resolves to {ours}, but {tag} builds {theirs}")
+
+
+def stage_and_commit(message: str) -> None:
+    run("git", "add", "bin-hashes.json", "flake.nix", "flake.lock", capture=False)
+    run("git", "commit", "-m", message, capture=False)
 
 
 def main() -> int:
@@ -221,7 +317,7 @@ def main() -> int:
     )
     parser.add_argument(
         "--version",
-        help="target upstream binary release, for example 15.1.8 or v15.1.8; defaults to the latest release",
+        help="target upstream binary release, for example 17.3.0 or v17.3.0; defaults to the latest release. 17.3.0 and later only: earlier tags carry no flake to pin for #upstream",
     )
     args = parser.parse_args()
 
@@ -236,19 +332,42 @@ def main() -> int:
     with tempfile.TemporaryDirectory(prefix="oh-my-pi-bin-update-", dir=TMP_ROOT) as temp_dir:
         hashes = compute_hashes(release, Path(temp_dir))
 
-    if latest_version == current["version"] and hashes == current["hashes"]:
+    # `#upstream` is upstream's own flake at this release, so the pin and
+    # bin-hashes.json move in one commit; the flake refuses to evaluate when
+    # they disagree.
+    rev = resolve_tag_revision(latest_tag)
+    bin_current = latest_version == current["version"] and hashes == current["hashes"]
+    pin_current = read_flake_rev() == rev and read_locked_rev() == rev
+
+    if bin_current and pin_current:
         print(f"oh-my-pi-bin is already up to date at {latest_tag}")
         return 0
 
+    message = (
+        f"Repin {UPSTREAM_INPUT} to {latest_tag}"
+        if bin_current
+        else f"Update oh-my-pi-bin to {latest_tag}"
+    )
+    print(message)
 
-    print(f"Updating oh-my-pi-bin to {latest_tag}")
-    for system, hash_value in sorted(hashes.items()):
-        print(f"  {system}: {hash_value}")
+    if not bin_current:
+        for system, hash_value in sorted(hashes.items()):
+            print(f"  {system}: {hash_value}")
+        write_bin_hashes(version=latest_version, hashes=hashes)
 
-    write_bin_hashes(version=latest_version, hashes=hashes)
+    if not pin_current:
+        write_flake_rev(rev)
+        run("nix", "flake", "update", UPSTREAM_INPUT, capture=False)
+        locked_rev = read_locked_rev()
+        if locked_rev != rev:
+            raise SystemExit(
+                f"locked {UPSTREAM_INPUT} commit is {locked_rev}, expected {rev}"
+            )
+
+    verify_upstream_pin(latest_tag)
     verify_build()
-    stage_and_commit(latest_tag)
-    print(f"Committed oh-my-pi-bin update for {latest_tag}. Review locally, then push when ready.")
+    stage_and_commit(message)
+    print(f"Committed: {message}. Review locally, then push when ready.")
     return 0
 
 

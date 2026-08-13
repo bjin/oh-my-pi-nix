@@ -1,6 +1,6 @@
 # oh-my-pi-nix
 
-Nix flake for installing and building [oh-my-pi](https://github.com/can1357/oh-my-pi) from source, plus an independently versioned upstream binary package.
+Nix flake for installing and building [oh-my-pi](https://github.com/can1357/oh-my-pi) from source, plus an independently versioned upstream binary package and upstream's own flake output for the release this repository tracks.
 
 ## Install
 
@@ -30,6 +30,15 @@ The same cache also carries `x86_64-linux` builds of upstream's own flake, for e
 ```bash
 nix shell nixpkgs#cachix -c cachix use oh-my-pi
 nix profile add github:can1357/oh-my-pi/v17.3.0
+```
+
+That pins the profile entry to one release: `nix profile upgrade` re-resolves the flake reference it was installed from, and a release tag never moves on to the next version. The `#upstream` output of this flake is the same package — upstream's own flake output, for the release this repository currently tracks, evaluating to the identical store path and substituting from the identical cache entry — behind a reference that does move:
+
+```bash
+nix shell nixpkgs#cachix -c cachix use oh-my-pi
+nix profile add github:bjin/oh-my-pi-nix#upstream
+# later, once this repository has picked up a newer release
+nix profile upgrade --all
 ```
 
 After installation, `omp` will be available from your profile.
@@ -71,9 +80,13 @@ Bump the upstream binary `oh-my-pi-bin` package to the latest release:
 python3 scripts/update-bin.py
 ```
 
-This updates only `bin-hashes.json`, verifies with `nix build .#oh-my-pi-bin`, and creates a local commit. The source-built and binary packages are intentionally versioned and updated independently.
+This updates `bin-hashes.json` and, in the same commit, repins the `oh-my-pi-upstream` input to that release, because `#upstream` is upstream's own flake at the version `bin-hashes.json` names. It verifies with `nix build .#oh-my-pi-bin`, checks that `#upstream` evaluates to the same store path as `github:can1357/oh-my-pi/vX.Y.Z#packages.x86_64-linux.default` — an evaluation only; that build belongs to `upstream.yml` — and creates a local commit. The source-built and binary packages are intentionally versioned and updated independently.
 
-`.github/workflows/upstream.yml` builds upstream's own flake for the version in `bin-hashes.json` (`github:can1357/oh-my-pi/vX.Y.Z#packages.x86_64-linux.default`) into the same Cachix cache. The tag ref is safe here, unlike the `oh-my-pi` input: a version only reaches `bin-hashes.json` once upstream published release assets for it, and such a tag never moves. `workflow_dispatch` builds unconditionally, or the release given as its `version` input, and leaves deduplication to Cachix. Pushes build only when the `bin-hashes.json` blob really changed between `github.event.before` and the pushed commit, so a force push that rewrites history around an unchanged file is skipped; a `before` commit that is gone falls back to building.
+`#upstream` re-exports `oh-my-pi-upstream.packages.x86_64-linux.default` untouched; the only thing this repository contributes is the pin. That input deliberately carries no `inputs.*.follows`, so upstream's transitive pins come from its own `flake.lock` and the derivation is identical to the one `github:can1357/oh-my-pi/vX.Y.Z` produces — redirecting even one of them would change every store path in that build and miss the cache. Evaluating `#upstream` therefore also instantiates upstream's own `nixpkgs`, and this flake's lock carries upstream's full input closure. A pin that disagrees with `bin-hashes.json` makes `#upstream` throw rather than resolve to a store path nothing ever cached.
+
+`#upstream` is bounded by upstream's own packaging: `flake.nix` first appears in 17.3.0, so `scripts/update-bin.py --version` cannot target an earlier release, and a release that dropped or broke that flake would fail the updater and hold `oh-my-pi-bin` back with it until the pin is dealt with.
+
+`.github/workflows/upstream.yml` builds upstream's own flake for the version in `bin-hashes.json` (`github:can1357/oh-my-pi/vX.Y.Z#packages.x86_64-linux.default`) into the same Cachix cache, then asserts that this flake's `#upstream` resolves to the store path it just built and is about to push. The tag ref is safe here, unlike the `oh-my-pi` input: a version only reaches `bin-hashes.json` once upstream published release assets for it, and such a tag never moves. `workflow_dispatch` builds unconditionally, or the release given as its `version` input, and leaves deduplication to Cachix; the `#upstream` assertion is skipped when that version is not the one `bin-hashes.json` names. Pushes build only when the `bin-hashes.json` blob really changed between `github.event.before` and the pushed commit, so a force push that rewrites history around an unchanged file is skipped; a `before` commit that is gone falls back to building.
 
 Refresh locked flake inputs:
 

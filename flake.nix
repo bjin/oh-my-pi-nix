@@ -1,5 +1,5 @@
 {
-  description = "Package oh-my-pi from source and upstream binaries";
+  description = "Package oh-my-pi from source and upstream binaries, and re-export upstream's own flake";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -30,6 +30,23 @@
       url = "github:can1357/oh-my-pi/326d24bd40d9858e24e1036ae739c27c72eeb543";
       flake = false;
     };
+
+    # Upstream's own flake, at the release `bin-hashes.json` names. `#upstream`
+    # re-exports its `x86_64-linux` package untouched, so it evaluates to the
+    # very store path `github:can1357/oh-my-pi/vX.Y.Z` builds — the one
+    # `.github/workflows/upstream.yml` pushes to Cachix — except that it is an
+    # output of a flake that keeps moving, so `nix profile upgrade` follows
+    # upstream releases instead of freezing on the tag it was installed from.
+    #
+    # Deliberately without `inputs.*.follows`: upstream's transitive pins come
+    # from its own `flake.lock`, and redirecting any of them would change every
+    # store path in that build and lose the cache.
+    #
+    # Pinned by commit like the `oh-my-pi` input above, for a different reason:
+    # a tag that upstream published release assets for does not move, but a tag
+    # ref would still let `nix flake update` retarget `#upstream` if one ever
+    # did, away from the only store path the cache carries.
+    oh-my-pi-upstream.url = "github:can1357/oh-my-pi/326d24bd40d9858e24e1036ae739c27c72eeb543";
   };
 
   outputs =
@@ -39,6 +56,7 @@
       nix-bun,
       rust-overlay,
       oh-my-pi,
+      oh-my-pi-upstream,
       # `self` is always passed; this flake has no use for it.
       ...
     }:
@@ -465,6 +483,20 @@
 
         meta = commonMeta;
       };
+
+      # `#upstream` is upstream's own package, unmodified: the only thing this
+      # flake adds is the pin. `bin-hashes.json` drives both it and
+      # `oh-my-pi-bin`, so assert that the pinned tree really is the release it
+      # names; a drifted pin would resolve to a store path nothing ever built
+      # into the cache.
+      ohMyPiUpstream =
+        let
+          package = oh-my-pi-upstream.packages.${system}.default;
+        in
+        if package.version == binVersion then
+          package
+        else
+          throw "oh-my-pi-upstream builds ${package.version}, but bin-hashes.json names ${binVersion}; run scripts/update-bin.py";
     in
     {
       formatter.${system} = pkgs.nixfmt;
@@ -473,6 +505,7 @@
         default = ohMyPi;
         "oh-my-pi" = ohMyPi;
         "oh-my-pi-bin" = ohMyPiBin;
+        upstream = ohMyPiUpstream;
       };
 
       apps.${system} = {
@@ -487,6 +520,10 @@
         "oh-my-pi-bin" = {
           type = "app";
           program = "${ohMyPiBin}/bin/omp";
+        };
+        upstream = {
+          type = "app";
+          program = "${ohMyPiUpstream}/bin/omp";
         };
       };
     };

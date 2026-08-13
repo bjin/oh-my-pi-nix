@@ -43,8 +43,12 @@ def require_clean_git_tree() -> None:
 
 def read_locked_revs() -> dict[str, str]:
     lock = json.loads(LOCK_PATH.read_text())
+    # Node names are not input names: `oh-my-pi-upstream` brings its own
+    # `nixpkgs`, `bun2nix` and `rust-overlay` nodes, and those took the plain
+    # names, pushing this flake's own nodes to `<name>_2`.
+    root = lock["nodes"]["root"]["inputs"]
     return {
-        input_name: lock["nodes"][input_name]["locked"]["rev"]
+        input_name: lock["nodes"][root[input_name]]["locked"]["rev"]
         for input_name in INPUTS_TO_UPDATE
     }
 

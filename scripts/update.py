@@ -131,7 +131,10 @@ def write_flake_rev(rev: str) -> None:
 
 def read_locked_rev() -> str:
     lock = json.loads(LOCK_PATH.read_text())
-    return lock["nodes"][INPUT_NAME]["locked"]["rev"]
+    # Node names are not input names: a transitive input of `oh-my-pi-upstream`
+    # can take the plain name and push this repository's own node to `<name>_2`.
+    node = lock["nodes"]["root"]["inputs"][INPUT_NAME]
+    return lock["nodes"][node]["locked"]["rev"]
 
 
 def read_package_version() -> str:
