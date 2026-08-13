@@ -27,7 +27,7 @@
     # which is also the updater's interval. `scripts/update.py` resolves the tag
     # with `git ls-remote` and writes the commit it saw.
     oh-my-pi = {
-      url = "github:can1357/oh-my-pi/6563b164244800594d99158ca67f3b1625935585";
+      url = "github:can1357/oh-my-pi/de99219db09091dea34f70c316733dd8edc2f618";
       flake = false;
     };
   };
