@@ -27,6 +27,8 @@ nix profile add github:bjin/oh-my-pi-nix#oh-my-pi-bin
 
 After installation, `omp` will be available from your profile.
 
+The same cache also carries `x86_64-linux` builds of upstream's own flake (`github:can1357/oh-my-pi/vX.Y.Z`) for every release this repository has picked up, so installing from upstream's flake directly is prebuilt as well.
+
 ## Run without installing
 
 ```bash
@@ -65,6 +67,8 @@ python3 scripts/update-bin.py
 ```
 
 This updates only `bin-hashes.json`, verifies with `nix build .#oh-my-pi-bin`, and creates a local commit. The source-built and binary packages are intentionally versioned and updated independently.
+
+`.github/workflows/upstream.yml` builds upstream's own flake for the version in `bin-hashes.json` (`github:can1357/oh-my-pi/vX.Y.Z#packages.x86_64-linux.default`) into the same Cachix cache. The tag ref is safe here, unlike the `oh-my-pi` input: a version only reaches `bin-hashes.json` once upstream published release assets for it, and such a tag never moves. `workflow_dispatch` builds unconditionally, or the release given as its `version` input, and leaves deduplication to Cachix. Pushes build only when the `bin-hashes.json` blob really changed between `github.event.before` and the pushed commit, so a force push that rewrites history around an unchanged file is skipped; a `before` commit that is gone falls back to building.
 
 Refresh locked flake inputs:
 

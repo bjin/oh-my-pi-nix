@@ -1,0 +1,191 @@
+name: Upstream flake
+
+on:
+  # `bin-hashes.json` is the only file in this repository that tracks upstream
+  # releases, so its content decides which upstream tag is worth building.
+  # GitHub's own path filter keeps the ordinary updater push (flake.nix and
+  # flake.lock only) from starting a runner at all. It is not sufficient on its
+  # own: it always runs when a push carries more than 1000 commits or the diff
+  # times out, and it diffs through the merge base rather than the pushed
+  # range, so a force push onto a rewritten history can list the file even when
+  # its content is identical. The `detect` job below re-checks the pushed range.
+  push:
+    branches: [master]
+    paths: [bin-hashes.json]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Upstream release to build, e.g. 17.3.0 (default: bin-hashes.json)'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: upstream-flake-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  detect:
+    name: Detect upstream release
+    runs-on: ubuntu-latest
+
+    outputs:
+      build: ${{ steps.detect.outputs.build }}
+      version: ${{ steps.detect.outputs.version }}
+      tag: ${{ steps.detect.outputs.tag }}
+
+    steps:
+      # Shallow, with the credentials left in place: the commit that was pushed
+      # over is fetched by object id below, which needs a working `origin`.
+      - name: Check out pushed commit
+        uses: actions/checkout@v4
+
+      - name: Decide whether the upstream release changed
+        id: detect
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          VERSION_INPUT: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+
+          empty_sha=0000000000000000000000000000000000000000
+          pinned=false
+
+          version="${VERSION_INPUT#v}"
+          if [ -n "$version" ]; then
+            pinned=true
+          else
+            version=$(jq -er '.version' bin-hashes.json)
+          fi
+
+          if [[ ! $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Unexpected upstream version: $version" >&2
+            exit 1
+          fi
+
+          if [ "$pinned" = true ]; then
+            build=true
+            reason='requested by workflow input'
+          elif [ "$EVENT_NAME" != 'push' ]; then
+            # Cachix already deduplicates the build, so a manual run rebuilds
+            # whatever bin-hashes.json currently points at without any diffing.
+            build=true
+            reason="$EVENT_NAME run builds bin-hashes.json unconditionally"
+          elif [ -z "$BEFORE_SHA" ] || [ "$BEFORE_SHA" = "$empty_sha" ]; then
+            build=true
+            reason='the push reported no previous commit'
+          elif ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null \
+            && ! git fetch --no-tags --depth=1 origin "$BEFORE_SHA"; then
+            # Force pushes keep the overwritten commit fetchable until GitHub's
+            # garbage collection removes it. Once it is gone the pushed range is
+            # unknowable, so fall back to building.
+            build=true
+            reason="the commit before the push is unavailable: $BEFORE_SHA"
+          else
+            # Compare the pushed range directly (not through a merge base), and
+            # compare blob ids rather than running a diff: a force push that
+            # rewrites history but leaves bin-hashes.json byte-identical must
+            # not trigger a build.
+            before_blob=$(git rev-parse "${BEFORE_SHA}:bin-hashes.json" 2>/dev/null || true)
+            after_blob=$(git rev-parse 'HEAD:bin-hashes.json')
+            if [ "$before_blob" = "$after_blob" ]; then
+              build=false
+              reason="bin-hashes.json is unchanged since $BEFORE_SHA"
+            else
+              build=true
+              reason="bin-hashes.json changed since $BEFORE_SHA"
+            fi
+          fi
+
+          {
+            echo "build=$build"
+            echo "version=$version"
+            echo "tag=v$version"
+          } >> "$GITHUB_OUTPUT"
+
+          if [ "$build" = true ]; then
+            summary="Building upstream v$version: $reason."
+          else
+            summary="Skipping upstream v$version: $reason."
+          fi
+          echo "$summary"
+          echo "$summary" >> "$GITHUB_STEP_SUMMARY"
+
+  build:
+    name: Build and cache upstream ${{ needs.detect.outputs.tag }}
+    needs: detect
+    if: needs.detect.outputs.build == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      # No checkout: this job builds upstream's own flake, straight from the
+      # release tag. Nothing in this repository takes part in the build.
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          # Upstream's flake declares this substituter in `nixConfig`, which
+          # only applies with `accept-flake-config`. Configure it here instead
+          # of trusting whatever the fetched tree asks for; without it, bun2nix
+          # and its Rust closure are built from source.
+          extra_nix_config: |
+            extra-substituters = https://nix-community.cachix.org
+            extra-trusted-public-keys = nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs=
+
+      # Before the build, so an already-cached release substitutes instead of
+      # rebuilding: a re-run, a manual run, or a force push that loses the
+      # previous commit all resolve to the same store path.
+      - name: Configure Cachix
+        if: vars.CACHIX_CACHE_NAME != ''
+        uses: cachix/cachix-action@v17
+        with:
+          name: ${{ vars.CACHIX_CACHE_NAME }}
+          skipPush: true
+
+      - name: Build upstream flake
+        env:
+          # Release tags are immutable once upstream publishes assets for them,
+          # which is what puts the version into bin-hashes.json, so the tag ref
+          # is safe here (unlike the `oh-my-pi` flake input, which is pinned by
+          # commit because unreleased tags do get force-moved).
+          FLAKE_REF: github:can1357/oh-my-pi/${{ needs.detect.outputs.tag }}
+        run: |
+          nix build "${FLAKE_REF}#packages.x86_64-linux.default" \
+            --out-link result-upstream \
+            --print-build-logs
+
+      - name: Smoke test package
+        env:
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          set -euo pipefail
+          output=$(./result-upstream/bin/omp --smoke-test)
+          if [ "$output" != 'smoke-test: ok' ]; then
+            echo "Unexpected smoke test output: $output" >&2
+            exit 1
+          fi
+          # `omp --version` prints `<bin>/<version>`; the tag has to build the
+          # release that bin-hashes.json named, or the cache entry is bogus.
+          reported=$(./result-upstream/bin/omp --version)
+          if [ "$reported" != "omp/$VERSION" ]; then
+            echo "Built $reported, expected omp/$VERSION" >&2
+            exit 1
+          fi
+          echo "Built and verified $reported"
+
+      - name: Upload package to Cachix
+        if: vars.CACHIX_CACHE_NAME != ''
+        env:
+          CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+          CACHIX_CACHE_NAME: ${{ vars.CACHIX_CACHE_NAME }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CACHIX_AUTH_TOKEN" ]; then
+            echo "CACHIX_AUTH_TOKEN is not configured; skipping Cachix upload."
+            exit 0
+          fi
+
+          cachix authtoken "$CACHIX_AUTH_TOKEN"
+          readlink -f result-upstream | cachix push "$CACHIX_CACHE_NAME"
