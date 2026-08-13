@@ -6,7 +6,6 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -15,19 +14,13 @@ from pathlib import Path
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
 TMP_ROOT = ROOT / ".tmp"
-HASHES = ROOT / "hashes.json"
+FLAKE = ROOT / "flake.nix"
+LOCK_PATH = ROOT / "flake.lock"
+SYSTEM = "x86_64-linux"
+INPUT_NAME = "oh-my-pi"
 UPSTREAM_REPO_URL = "https://github.com/can1357/oh-my-pi.git"
 UPSTREAM_TAG_GLOB = "v*.*.*"
-FAKE_HASH = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
-FLAKE = ROOT / "flake.nix"
-RECOVERABLE_CHANGED_PATHS = {
-    "flake.nix",
-    "flake.lock",
-    "hashes.json",
-    "scripts/update.py",
-    "scripts/update-flake.py",
-}
-HASH_KEYS = ("version", "srcRev", "srcHash", "bunHash", "cargoHash")
+FLAKE_URL_PATTERN = r'^(\s*url = "github:can1357/oh-my-pi/)([0-9a-f]{40})(";)$'
 
 
 def run(
@@ -48,106 +41,12 @@ def run(
     return result.stdout.strip() if capture and result.stdout is not None else ""
 
 
-def run_and_capture_output(
-    *args: str,
-    cwd: Path | None = None,
-    env: dict[str, str] | None = None,
-) -> tuple[int, str]:
-    process = subprocess.Popen(
-        list(args),
-        cwd=cwd or ROOT,
-        env=env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-    )
-    output_parts: list[str] = []
-    if process.stdout is None:
-        raise SystemExit(f"failed to capture output for command: {' '.join(args)}")
-
-    for chunk in process.stdout:
-        sys.stdout.write(chunk)
-        sys.stdout.flush()
-        output_parts.append(chunk)
-
-    return process.wait(), "".join(output_parts)
-
-
-def parse_hashes(raw: str, source: str) -> dict[str, str]:
-    data = json.loads(raw)
-    if not isinstance(data, dict):
-        raise SystemExit(f"{source} is not a JSON object")
-
-    hashes: dict[str, str] = {}
-    for key in HASH_KEYS:
-        value = data.get(key)
-        if not isinstance(value, str) or not value:
-            raise SystemExit(f"could not parse {key} from {source}")
-        hashes[key] = value
-    return hashes
-
-
-def read_hashes() -> dict[str, str]:
-    return parse_hashes(HASHES.read_text(), "hashes.json")
-
-
-def read_head_hashes() -> dict[str, str]:
-    return parse_hashes(run("git", "show", "HEAD:hashes.json"), "HEAD:hashes.json")
-
-
-def git_changed_paths_vs_head() -> set[str]:
-    paths: set[str] = set()
-    for args in (
-        ("git", "diff", "--name-only", "HEAD", "--"),
-        ("git", "diff", "--cached", "--name-only", "HEAD", "--"),
-    ):
-        paths.update(path for path in run(*args).splitlines() if path)
-    return paths
-
-
-def get_recoverable_changed_paths() -> set[str]:
-    changed_paths = git_changed_paths_vs_head()
-    unexpected_paths = changed_paths - RECOVERABLE_CHANGED_PATHS
-    if unexpected_paths:
-        formatted = ", ".join(sorted(unexpected_paths))
-        raise SystemExit(
-            f"working tree has unrelated changes; commit or stash before running update.py: {formatted}"
-        )
-    return changed_paths
-
-
-def get_recovery_state(hashes: dict[str, str]) -> str | None:
-    changed_paths = get_recoverable_changed_paths()
-    if not changed_paths:
-        if hashes["bunHash"] == FAKE_HASH or hashes["cargoHash"] == FAKE_HASH:
-            raise SystemExit(
-                "hashes.json contains a fake dependency hash, but there is no update state to recover"
-            )
-        return None
-
-
-    if "hashes.json" not in changed_paths:
+def require_clean_git_tree() -> None:
+    porcelain = run("git", "status", "--porcelain")
+    if porcelain:
         raise SystemExit(
             "working tree is not clean; commit or stash changes before running update.py"
         )
-
-    head_hashes = read_head_hashes()
-    if all(hashes[key] == head_hashes[key] for key in ("version", "srcRev")):
-        raise SystemExit(
-            "cannot recover update state because hashes.json did not update version or srcRev"
-        )
-
-    bun_is_fake = hashes["bunHash"] == FAKE_HASH
-    cargo_is_fake = hashes["cargoHash"] == FAKE_HASH
-    if cargo_is_fake and not bun_is_fake:
-        raise SystemExit(
-            "cannot recover inconsistent hash state: cargoHash is fake but bunHash is resolved"
-        )
-    if cargo_is_fake:
-        return "resolve-cargo"
-    if bun_is_fake:
-        return "resolve-bun"
-    return "verify"
 
 
 def resolve_tag_revision(tag: str) -> str:
@@ -201,233 +100,44 @@ def normalize_tag(raw_version: str) -> str:
     return tag
 
 
-def require_upstream_tag(tag: str) -> str:
-    return resolve_tag_revision(tag)
-
-
 def resolve_target_tag(raw_version: str | None) -> tuple[str, str, str]:
     if raw_version:
         tag = normalize_tag(raw_version)
-        rev = require_upstream_tag(tag)
+        rev = resolve_tag_revision(tag)
     else:
         tag, rev = get_latest_tag()
     return tag, tag.removeprefix("v"), rev
 
 
-def checkout_source(tag: str, rev: str, workdir: Path) -> Path:
-    source_dir = workdir / "source"
-    run(
-        "git",
-        "clone",
-        "--quiet",
-        "--depth",
-        "1",
-        "--branch",
-        tag,
-        UPSTREAM_REPO_URL,
-        str(source_dir),
-        cwd=workdir,
-        capture=False,
-    )
-    actual_rev = run("git", "-C", str(source_dir), "rev-parse", "HEAD")
-    if actual_rev != rev:
-        raise SystemExit(
-            f"upstream tag {tag} moved while updating: expected {rev}, got {actual_rev}"
-        )
-    shutil.rmtree(source_dir / ".git")
-    return source_dir
-
-
-def get_current_rust_toolchain_channel() -> str:
-    content = FLAKE.read_text()
-    match = re.search(r'^\s*rustToolchainChannel = "([^"]+)";$', content, re.MULTILINE)
+def read_flake_rev() -> str:
+    match = re.search(FLAKE_URL_PATTERN, FLAKE.read_text(), re.MULTILINE)
     if match is None:
-        raise SystemExit("could not parse rust toolchain channel from flake.nix")
-    return match.group(1)
+        raise SystemExit("could not parse the oh-my-pi input commit from flake.nix")
+    return match.group(2)
 
 
-def get_rust_toolchain_channel(source_dir: Path) -> str:
-    content = (source_dir / "rust-toolchain.toml").read_text()
-    match = re.search(r'^channel = "([^"]+)"$', content, re.MULTILINE)
-    if match is None:
-        raise SystemExit(
-            "could not parse rust toolchain channel from rust-toolchain.toml"
-        )
-    return match.group(1)
-
-
-def compute_src_hash(source_dir: Path) -> str:
-    return run("nix", "hash", "path", "--sri", str(source_dir))
-
-
-def update_flake(
-    version: str,
-    src_rev: str,
-    rust_toolchain_channel: str,
-    src_hash: str,
-    bun_hash: str,
-    cargo_hash: str,
-) -> None:
-    run(
-        sys.executable,
-        str(SCRIPT_DIR / "update-flake.py"),
-        "--version",
-        version,
-        "--src-rev",
-        src_rev,
-        "--rust-toolchain-channel",
-        rust_toolchain_channel,
-        "--src-hash",
-        src_hash,
-        "--bun-hash",
-        bun_hash,
-        "--cargo-hash",
-        cargo_hash,
-        capture=False,
+def write_flake_rev(rev: str) -> None:
+    content, count = re.subn(
+        FLAKE_URL_PATTERN,
+        lambda match: f"{match.group(1)}{rev}{match.group(3)}",
+        FLAKE.read_text(),
+        count=1,
+        flags=re.MULTILINE,
     )
+    if count != 1:
+        raise SystemExit("could not rewrite the oh-my-pi input commit in flake.nix")
+    FLAKE.write_text(content)
 
 
-def extract_fixed_output_hashes(
-    version: str, build_output: str
-) -> tuple[str | None, str | None]:
-    matches = list(
-        re.finditer(
-            r"hash mismatch in fixed-output derivation '([^']+)':\n\s*specified:\s*(sha256-[A-Za-z0-9+/=]+)\n\s*got:\s*(sha256-[A-Za-z0-9+/=]+)",
-            build_output,
-        )
-    )
-    if not matches:
-        raise SystemExit(
-            f"could not extract fixed-output hash from nix output:\n\n{build_output}"
-        )
-
-    cargo_hash: str | None = None
-    bun_hash: str | None = None
-    bun_drv_name = f"oh-my-pi-{version}-bun-deps.drv"
-    unexpected_derivations: list[str] = []
-    for match in matches:
-        drv_name = Path(match.group(1)).name
-        drv_label = drv_name.split("-", 1)[1] if "-" in drv_name else drv_name
-        got_hash = match.group(3)
-        if drv_label in {"cargo-deps-vendor-staging.drv", "cargo-deps-vendor.drv"}:
-            cargo_hash = got_hash
-            continue
-        if drv_label == bun_drv_name:
-            bun_hash = got_hash
-            continue
-        unexpected_derivations.append(drv_name)
-
-    if unexpected_derivations:
-        raise SystemExit(
-            "encountered unexpected fixed-output derivation mismatch(es): "
-            + ", ".join(unexpected_derivations)
-            + f"\n\n{build_output}"
-        )
-
-    return cargo_hash, bun_hash
+def read_locked_rev() -> str:
+    lock = json.loads(LOCK_PATH.read_text())
+    return lock["nodes"][INPUT_NAME]["locked"]["rev"]
 
 
-def resolve_hash_from_build(
-    *,
-    version: str,
-    src_rev: str,
-    rust_toolchain_channel: str,
-    src_hash: str,
-    bun_hash: str,
-    cargo_hash: str,
-    installable: str,
-    dependency: str,
-) -> tuple[str, str]:
-    update_flake(
-        version=version,
-        src_rev=src_rev,
-        rust_toolchain_channel=rust_toolchain_channel,
-        src_hash=src_hash,
-        bun_hash=bun_hash,
-        cargo_hash=cargo_hash,
-    )
-
-    returncode, output = run_and_capture_output(
-        "nix", "build", installable, "--no-link"
-    )
-    if returncode == 0:
-        raise SystemExit(
-            f"{dependency} deps built successfully with a fake hash; cannot determine the real hash"
-        )
-
-    next_cargo_hash, next_bun_hash = extract_fixed_output_hashes(version, output)
-    if dependency == "cargo":
-        if next_cargo_hash is None:
-            raise SystemExit(
-                f"could not extract cargo dependency hash from nix output:\n\n{output}"
-            )
-        if next_bun_hash is not None:
-            raise SystemExit(
-                f"unexpected bun dependency hash while resolving cargo deps:\n\n{output}"
-            )
-        cargo_hash = next_cargo_hash
-    elif dependency == "bun":
-        if next_bun_hash is None:
-            raise SystemExit(
-                f"could not extract bun dependency hash from nix output:\n\n{output}"
-            )
-        if next_cargo_hash is not None:
-            raise SystemExit(
-                f"unexpected cargo dependency hash while resolving bun deps:\n\n{output}"
-            )
-        bun_hash = next_bun_hash
-    else:
-        raise AssertionError(f"unsupported dependency kind: {dependency}")
-
-    update_flake(
-        version=version,
-        src_rev=src_rev,
-        rust_toolchain_channel=rust_toolchain_channel,
-        src_hash=src_hash,
-        bun_hash=bun_hash,
-        cargo_hash=cargo_hash,
-    )
-    return cargo_hash, bun_hash
-
-
-def resolve_cargo_hash(
-    version: str,
-    src_rev: str,
-    rust_toolchain_channel: str,
-    src_hash: str,
-    bun_hash: str,
-) -> str:
-    cargo_hash, _ = resolve_hash_from_build(
-        version=version,
-        src_rev=src_rev,
-        rust_toolchain_channel=rust_toolchain_channel,
-        src_hash=src_hash,
-        bun_hash=bun_hash,
-        cargo_hash=FAKE_HASH,
-        installable=".#default.cargoDeps",
-        dependency="cargo",
-    )
-    return cargo_hash
-
-
-def resolve_bun_hash(
-    version: str,
-    src_rev: str,
-    rust_toolchain_channel: str,
-    src_hash: str,
-    cargo_hash: str,
-) -> str:
-    _, bun_hash = resolve_hash_from_build(
-        version=version,
-        src_rev=src_rev,
-        rust_toolchain_channel=rust_toolchain_channel,
-        src_hash=src_hash,
-        bun_hash=FAKE_HASH,
-        cargo_hash=cargo_hash,
-        installable=".#default.bunDeps",
-        dependency="bun",
-    )
-    return bun_hash
+def read_package_version() -> str:
+    # The derivation takes its version from the pinned source tree, so this also
+    # proves the tag points at the release it claims to be.
+    return run("nix", "eval", "--raw", f".#packages.{SYSTEM}.oh-my-pi.version")
 
 
 def run_omp_isolated(*args: str, extra_env: dict[str, str] | None = None) -> str:
@@ -459,10 +169,10 @@ def verify_haskell_crash_regression() -> None:
 
 
 def verify_embedded_bun_runtime() -> None:
-    # nixpkgs' bun is older than upstream's engines.bun, so flake.nix writes the
-    # payload into a pinned pristine Bun release. Without that template the CLI
-    # still starts, but every `Bun.Image` caller (image resize, PNG conversion,
-    # kitty rendering) silently degrades.
+    # The standalone binary is written into a pristine release of the Bun that
+    # upstream's engines.bun asks for. Without that template the CLI still
+    # starts, but every `Bun.Image` caller (image resize, PNG conversion, kitty
+    # rendering) silently degrades.
     output = run_omp_isolated(
         "-e",
         "console.log(`${Bun.version} ${typeof Bun.Image}`)",
@@ -504,127 +214,65 @@ def verify_build() -> None:
     verify_no_embedded_native_addons()
 
 
-def commit_message(tag: str, version: str, src_rev: str) -> str:
-    head_hashes = read_head_hashes()
-    if version == head_hashes["version"] and src_rev != head_hashes["srcRev"]:
-        return f"Update oh-my-pi {tag} source revision to {src_rev[:12]}"
+def commit_message(tag: str, version: str, previous_version: str, rev: str) -> str:
+    if version == previous_version:
+        return f"Update oh-my-pi {tag} source revision to {rev[:12]}"
     return f"Update oh-my-pi to {tag}"
 
 
-def stage_and_commit(tag: str, version: str, src_rev: str) -> None:
-    run("git", "add", "flake.nix", "flake.lock", "hashes.json", capture=False)
-    run("git", "commit", "-m", commit_message(tag, version, src_rev), capture=False)
+def stage_and_commit(message: str) -> None:
+    run("git", "add", "flake.nix", "flake.lock", capture=False)
+    run("git", "commit", "-m", message, capture=False)
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Update this flake to an upstream Oh My Pi release"
+        description="Update this flake to an upstream oh-my-pi release"
     )
     parser.add_argument(
         "--version",
-        help="target upstream version, for example 14.5.14 or v14.5.14; defaults to the latest tag",
+        help="target upstream version, for example 17.3.0 or v17.3.0; defaults to the latest tag",
     )
     args = parser.parse_args()
 
-    hashes = read_hashes()
-    latest_tag, latest_version, latest_rev = resolve_target_tag(args.version)
+    require_clean_git_tree()
 
-    same_version_moved = (
-        latest_version == hashes["version"] and latest_rev != hashes["srcRev"]
-    )
-    if same_version_moved:
-        get_recoverable_changed_paths()
-        recovery_state = None
-        print(
-            f"Upstream tag {latest_tag} moved from {hashes['srcRev']} "
-            f"to {latest_rev}; restarting update"
+    previous_rev = read_locked_rev()
+    if read_flake_rev() != previous_rev:
+        raise SystemExit(
+            "flake.nix and flake.lock disagree on the pinned oh-my-pi commit; "
+            "run `nix flake update oh-my-pi` and commit the result first"
         )
+    previous_version = read_package_version()
+    tag, version, rev = resolve_target_tag(args.version)
+
+    if rev == previous_rev:
+        print(f"Already up to date at {tag} ({rev})")
+        return 0
+
+    if version == previous_version:
+        print(f"Upstream tag {tag} moved from {previous_rev} to {rev}")
     else:
-        recovery_state = get_recovery_state(hashes)
+        print(f"Updating from {previous_version} to {version} ({rev})")
 
-    if recovery_state is None:
-        if latest_version == hashes["version"] and latest_rev == hashes["srcRev"]:
-            print(f"Already up to date at {latest_tag} ({latest_rev})")
-            return 0
+    write_flake_rev(rev)
+    run("nix", "flake", "update", INPUT_NAME, capture=False)
 
-        TMP_ROOT.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(
-            prefix="oh-my-pi-update-", dir=TMP_ROOT
-        ) as temp_dir:
-            workdir = Path(temp_dir)
-            source_dir = checkout_source(latest_tag, latest_rev, workdir)
-            rust_toolchain_channel = get_rust_toolchain_channel(source_dir)
-            src_hash = compute_src_hash(source_dir)
+    locked_rev = read_locked_rev()
+    if locked_rev != rev:
+        raise SystemExit(
+            f"locked oh-my-pi commit is {locked_rev}, expected {rev}"
+        )
 
-            print(f"Updating to {latest_tag}")
-            print(f"  source rev:     {latest_rev}")
-            print(f"  rust toolchain: {rust_toolchain_channel}")
-            print(f"  src hash:       {src_hash}")
+    package_version = read_package_version()
+    if package_version != version:
+        raise SystemExit(
+            f"upstream tag {tag} builds version {package_version}, not {version}"
+        )
 
-            update_flake(
-                version=latest_version,
-                src_rev=latest_rev,
-                rust_toolchain_channel=rust_toolchain_channel,
-                src_hash=src_hash,
-                bun_hash=FAKE_HASH,
-                cargo_hash=FAKE_HASH,
-            )
-
-            cargo_hash = resolve_cargo_hash(
-                version=latest_version,
-                src_rev=latest_rev,
-                rust_toolchain_channel=rust_toolchain_channel,
-                src_hash=src_hash,
-                bun_hash=FAKE_HASH,
-            )
-            bun_hash = resolve_bun_hash(
-                version=latest_version,
-                src_rev=latest_rev,
-                rust_toolchain_channel=rust_toolchain_channel,
-                src_hash=src_hash,
-                cargo_hash=cargo_hash,
-            )
-    else:
-        latest_version = hashes["version"]
-        latest_tag = normalize_tag(latest_version)
-        latest_rev = hashes["srcRev"]
-        if args.version and normalize_tag(args.version) != latest_tag:
-            raise SystemExit(
-                f"cannot recover update for {latest_tag} while --version requests {normalize_tag(args.version)}"
-            )
-        rust_toolchain_channel = get_current_rust_toolchain_channel()
-        src_hash = hashes["srcHash"]
-        cargo_hash = hashes["cargoHash"]
-        bun_hash = hashes["bunHash"]
-
-        print(f"Recovering update for {latest_tag} from state: {recovery_state}")
-        print(f"  source rev:     {latest_rev}")
-        print(f"  rust toolchain: {rust_toolchain_channel}")
-        print(f"  src hash:       {src_hash}")
-
-        if recovery_state == "resolve-cargo":
-            cargo_hash = resolve_cargo_hash(
-                version=latest_version,
-                src_rev=latest_rev,
-                rust_toolchain_channel=rust_toolchain_channel,
-                src_hash=src_hash,
-                bun_hash=FAKE_HASH,
-            )
-
-        if recovery_state in {"resolve-cargo", "resolve-bun"}:
-            bun_hash = resolve_bun_hash(
-                version=latest_version,
-                src_rev=latest_rev,
-                rust_toolchain_channel=rust_toolchain_channel,
-                src_hash=src_hash,
-                cargo_hash=cargo_hash,
-            )
-
-    print(f"  cargo hash:     {cargo_hash}")
-    print(f"  bun hash:       {bun_hash}")
     verify_build()
-    stage_and_commit(latest_tag, latest_version, latest_rev)
-    print(f"Committed update for {latest_tag}. Review locally, then push when ready.")
+    stage_and_commit(commit_message(tag, version, previous_version, rev))
+    print(f"Committed update for {tag}. Review locally, then push when ready.")
     return 0
 
 

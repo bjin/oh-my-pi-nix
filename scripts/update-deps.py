@@ -12,7 +12,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 TMP_ROOT = ROOT / ".tmp"
 LOCK_PATH = ROOT / "flake.lock"
-INPUTS_TO_UPDATE = ("nixpkgs", "rust-overlay")
+INPUTS_TO_UPDATE = ("nixpkgs", "bun2nix", "nix-bun", "rust-overlay")
 PACKAGES_TO_VERIFY = ("oh-my-pi", "oh-my-pi-bin")
 
 

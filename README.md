@@ -42,15 +42,19 @@ nix build .
 
 ## For maintainers
 
-Bump the source-built `oh-my-pi` package to the latest upstream release:
+The source-built `oh-my-pi` package builds the upstream tree pinned as the `oh-my-pi` flake input (`flake = false`, so only the source is used, not upstream's own flake). Everything version-specific is read out of that tree at evaluation time: the version from `packages/coding-agent/package.json`, the Rust toolchain from `rust-toolchain.toml`, the crate set from `Cargo.lock`, the npm dependency set from upstream's generated `nix/bun.nix` (via `bun2nix`), and the Bun release from `engines.bun` (via `nix-bun`). No dependency hashes are maintained in this repository.
+
+Bump the source-built package to the latest upstream release:
 
 ```bash
 python3 scripts/update.py
 ```
 
-This updates the packaged upstream release, refreshes the hashes and lock data needed for the build, verifies with `nix build .`, and creates a local commit.
+This resolves the newest release tag with `git ls-remote`, writes that commit into the `oh-my-pi` input, re-locks it, checks that the tag really builds the version it claims, verifies with `nix build .`, and creates a local commit. The input is pinned by commit rather than by tag because upstream force-moves release tags, and a tag ref would be resolved through Nix's cached GitHub ref lookup, which serves the superseded commit for up to `tarball-ttl` (one hour, the same interval the updater runs on).
 
-`flake.nix` pins `bunTemplateVersion`, the pristine upstream Bun release the standalone binary is written into. nixpkgs' bun is older than upstream's `engines.bun`, and Bun's standalone writer corrupts patchelf'd templates ([oven-sh/bun#31023](https://github.com/oven-sh/bun/issues/31023)), so the build compiles with nixpkgs' bun and emits into that unmodified release binary. When upstream raises `engines.bun`, the build fails with the required version: bump `bunTemplateVersion` and its `hash`. The whole mechanism can be dropped once nixpkgs' bun both satisfies `engines.bun` and carries [oven-sh/bun#31024](https://github.com/oven-sh/bun/pull/31024).
+The derivation differs from upstream's own flake on purpose: it builds both CPU variants of the native addon (`x86-64-v2` and `x86-64-v3`) and ships them as loose `.node` files beside the binary, so nothing is unpacked into `~/.omp/natives` at first start; it installs shell completions; and it strips the build-time Bun store path that Bun's bundler stamps into the payload as a shebang (`disallowedReferences` fails the build if it comes back).
+
+A Bun bump upstream (`engines.bun`) is picked up automatically as long as `nix-bun` already packages that release; if it does not, evaluation fails with the missing version, and `scripts/update-deps.py` (or a later `nix-bun` release) resolves it.
 
 Bump the upstream binary `oh-my-pi-bin` package to the latest release:
 

@@ -3,9 +3,32 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    bun2nix = {
+      url = "github:nix-community/bun2nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+    nix-bun = {
+      url = "github:ryoppippi/nix-bun";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
+    };
+    # Source tree only (`flake = false`). This repository keeps its own
+    # derivation — loose native addons for both CPU variants, shell
+    # completions, and the independently versioned binary package — but reuses
+    # upstream's checked-in `nix/bun.nix`, `Cargo.lock` and
+    # `rust-toolchain.toml`, so no dependency hashes are maintained here.
+    #
+    # Pinned by commit, not by tag: upstream force-moves release tags onto new
+    # commits, and a tag ref is resolved through Nix's cached GitHub ref lookup,
+    # which keeps serving the superseded commit for `tarball-ttl` — one hour,
+    # which is also the updater's interval. `scripts/update.py` resolves the tag
+    # with `git ls-remote` and writes the commit it saw.
+    oh-my-pi = {
+      url = "github:can1357/oh-my-pi/326d24bd40d9858e24e1036ae739c27c72eeb543";
+      flake = false;
     };
   };
 
@@ -13,27 +36,50 @@
     {
       self,
       nixpkgs,
+      bun2nix,
+      nix-bun,
       rust-overlay,
+      oh-my-pi,
     }:
     let
       system = "x86_64-linux";
-      pkgs = import nixpkgs {
-        inherit system;
-        overlays = [ rust-overlay.overlays.default ];
-      };
-      lib = pkgs.lib;
+      lib = nixpkgs.lib;
 
       pname = "oh-my-pi";
-      sourceData = builtins.fromJSON (builtins.readFile ./hashes.json);
       binData = builtins.fromJSON (builtins.readFile ./bin-hashes.json);
 
-      runtimeLibraryPath = lib.makeLibraryPath [
-        pkgs.stdenv.cc.cc.lib
-        pkgs.zlib
-        # `/live` requires PulseAudio at runtime.
-        pkgs.libpulseaudio
-        pkgs.pipewire
-      ];
+      sourceSrc = oh-my-pi;
+      sourceVersion = (lib.importJSON (sourceSrc + "/packages/coding-agent/package.json")).version;
+
+      # `cli.ts` enforces `engines.bun` at startup and every `Bun.Image` caller
+      # relies on it unguarded, so the entire build runs on exactly that Bun
+      # release; nixpkgs' bun trails it (1.3.13 against a >=1.3.14 floor).
+      requiredBunVersion =
+        let
+          spec = (lib.importJSON (sourceSrc + "/packages/utils/package.json")).engines.bun;
+          parsed = builtins.match ">=([0-9]+\\.[0-9]+\\.[0-9]+)" spec;
+        in
+        if parsed == null then
+          throw "unrecognised engines.bun specifier: ${spec}"
+        else
+          builtins.head parsed;
+      bunSourcesFile = nix-bun + "/versions/${requiredBunVersion}.json";
+
+      pkgs = import nixpkgs {
+        inherit system;
+        overlays = [
+          rust-overlay.overlays.default
+          bun2nix.overlays.default
+          (final: _previous: {
+            bun =
+              if builtins.pathExists bunSourcesFile then
+                final.callPackage (nix-bun + "/package.nix") { sourcesFile = bunSourcesFile; }
+              else
+                throw "nix-bun packages no Bun ${requiredBunVersion}; update the nix-bun input";
+          })
+        ];
+      };
+
       installCheckEnvironment = ''
         export HOME="$TMPDIR/check-home"
         export XDG_DATA_HOME="$TMPDIR/check-xdg-data"
@@ -61,35 +107,20 @@
         test -s "$out/share/zsh/site-functions/_omp"
         test -s "$out/share/fish/vendor_completions.d/omp.fish"
       '';
-      # Two upstream constraints collide with nixpkgs' bun: upstream needs a Bun
-      # runtime newer than nixpkgs carries (engines.bun, enforced at startup by
-      # `cli.ts` and relied on unguarded by every `Bun.Image` caller), and Bun's
-      # standalone writer corrupts patchelf'd templates until oven-sh/bun#31024
-      # ships (oven-sh/bun#31023). Compile with nixpkgs' bun, but write the
-      # payload into the pristine upstream release binary: the shipped runtime is
-      # then exactly the one upstream targets, and the writer never sees a
-      # patched template. Drop once nixpkgs' bun both satisfies engines.bun and
-      # carries oven-sh/bun#31024.
-      useBunExecutableTemplate = ''
-        requiredBun="$(sed -n 's/.*"bun":[[:space:]]*">=\([0-9.]*\)".*/\1/p' packages/utils/package.json)"
-        if [ -z "$requiredBun" ]; then
-          echo "could not parse engines.bun from packages/utils/package.json" >&2
-          exit 1
-        fi
-        if [ "$(printf '%s\n%s\n' "$requiredBun" "${bunTemplateVersion}" | sort -V | head -n1)" != "$requiredBun" ]; then
-          echo "upstream requires bun >=$requiredBun, pinned template is ${bunTemplateVersion}" >&2
-          exit 1
-        fi
-
-        substituteInPlace packages/coding-agent/scripts/compile-binary.ts \
-          --replace-fail '...(options.target ? { target: options.target } : {}),' \
-            'executablePath: "${bunTemplate}/bin/bun",'
-      '';
+      # `pi-voice` dlopens these by bare name, so nothing links them and
+      # autoPatchelf cannot discover them: PulseAudio drives `/live` capture and
+      # ALSA is its fallback device backend.
+      dlopenedAudioLibraries = [
+        pkgs.libpulseaudio
+        pkgs.alsa-lib
+      ];
       useLooseNativeAddons = ''
         # Nix ships native addons as loose .node files next to the compiled
         # executable. Reuse upstream's reset path so the standalone binary does
-        # not embed a compressed native archive and the loader falls back to
-        # those loose files from process.execPath's directory.
+        # not embed a compressed native archive that every new version would
+        # unpack into ~/.omp/natives (138 MiB per release) on first start; the
+        # loader then falls back to those loose files from process.execPath's
+        # directory.
         substituteInPlace packages/natives/scripts/embed-native.ts \
           --replace-fail 'const reset = process.argv.includes("--reset");' \
             'const reset = true;'
@@ -102,9 +133,6 @@
         platforms = [ system ];
       };
 
-      sourceVersion = sourceData.version;
-      sourceRev = sourceData.srcRev;
-      rustToolchainChannel = "nightly-2026-07-28";
       rustTarget = "x86_64-unknown-linux-gnu";
       # Upstream drives the shipping addons through Bazel since 17.1.6, but the
       # rule (upstream `bazel/defs.bzl`, `crates/pi-natives/BUILD.bazel`) only
@@ -145,21 +173,19 @@
             "$out/lib/omp/${nativeAddonFile variant}"
         '') nativeAddonVariants
       );
+      addonAudioRunpath = lib.concatStrings (
+        lib.mapAttrsToList (variant: _: ''
+          patchelf --add-rpath "${lib.makeLibraryPath dlopenedAudioLibraries}" \
+            "$out/lib/omp/${nativeAddonFile variant}"
+        '') nativeAddonVariants
+      );
       checkNativeAddons = lib.concatStrings (
         lib.mapAttrsToList (variant: _: ''
           test -x "$out/lib/omp/${nativeAddonFile variant}"
         '') nativeAddonVariants
       );
-      sourceSrc = pkgs.fetchgit {
-        url = "https://github.com/can1357/oh-my-pi.git";
-        rev = sourceRev;
-        deepClone = false;
-        fetchSubmodules = false;
-        fetchTags = false;
-        leaveDotGit = false;
-        hash = sourceData.srcHash;
-      };
 
+      rustToolchainChannel = (lib.importTOML (sourceSrc + "/rust-toolchain.toml")).toolchain.channel;
       toolchainWithTarget =
         let
           nightlyDateMatch = builtins.match "nightly-(.+)" rustToolchainChannel;
@@ -187,90 +213,58 @@
         rustc = toolchainWithTarget;
       };
 
-      # Pristine upstream Bun release, used only as the standalone runtime
-      # template. `useBunExecutableTemplate` fails the build if this drifts below
-      # upstream's engines.bun floor.
-      bunTemplateVersion = "1.3.14";
-      bunTemplate = pkgs.stdenvNoCC.mkDerivation {
-        pname = "bun-executable-template";
-        version = bunTemplateVersion;
-        src = pkgs.fetchurl {
-          url = "https://github.com/oven-sh/bun/releases/download/bun-v${bunTemplateVersion}/bun-linux-x64.zip";
-          hash = "sha256-lR7iruhV8IWVruxiJSJqKY0/6oOj3NZGXAnLzN9+hI8=";
-        };
-        sourceRoot = "bun-linux-x64";
+      # Bun's standalone writer corrupts patchelf'd templates until
+      # oven-sh/bun#31024 ships (oven-sh/bun#31023), so the payload is written
+      # into the pristine release binary from the same Bun the build runs on.
+      bunRuntimeTemplate = pkgs.stdenvNoCC.mkDerivation {
+        pname = "omp-bun-runtime-template";
+        inherit (pkgs.bun) version;
+        src = pkgs.bun.src;
 
         nativeBuildInputs = [ pkgs.unzip ];
         strictDeps = true;
+        dontUnpack = true;
         dontConfigure = true;
         dontBuild = true;
-        # Any patchelf/strip pass here reintroduces oven-sh/bun#31023: the writer
-        # must see the release binary byte for byte.
         dontFixup = true;
 
         installPhase = ''
           runHook preInstall
 
-          install -Dm755 bun "$out/bin/bun"
+          unzip -q "$src"
+          install -Dm755 bun-*/bun "$out/libexec/bun"
 
           runHook postInstall
         '';
       };
 
-      bunDeps = pkgs.stdenvNoCC.mkDerivation {
-        name = "${pname}-${sourceVersion}-bun-deps";
-        src = sourceSrc;
-
-        nativeBuildInputs = [ pkgs.bun ];
-        strictDeps = true;
-        dontConfigure = true;
-        dontFixup = true;
-        impureEnvVars = lib.fetchers.proxyImpureEnvVars;
-
-        buildPhase = ''
-          runHook preBuild
-
-          export HOME="$TMPDIR/home"
-          export XDG_CACHE_HOME="$TMPDIR/xdg-cache"
-          export BUN_INSTALL_CACHE_DIR="$TMPDIR/bun-install-cache"
-          mkdir -p "$HOME" "$XDG_CACHE_HOME" "$BUN_INSTALL_CACHE_DIR"
-
-          bun install --frozen-lockfile --linker=hoisted --backend=copyfile
-
-          runHook postBuild
-        '';
-
-        installPhase = ''
-          runHook preInstall
-
-          mkdir -p "$out"
-          cp -a node_modules "$out/node_modules"
-
-          runHook postInstall
-        '';
-
-        outputHashMode = "recursive";
-        outputHash = sourceData.bunHash;
-      };
-
-      cargoDeps = rustPlatform.fetchCargoVendor {
-        src = sourceSrc;
-        hash = sourceData.cargoHash;
+      bunDeps = pkgs.bun2nix.fetchBunDeps {
+        bunNix = sourceSrc + "/nix/bun.nix";
+        overrides = pkgs.bun2nix.patchedDependenciesToOverrides {
+          patchedDependencies =
+            lib.mapAttrs (_: patch: sourceSrc + "/${patch}")
+              (lib.importJSON (sourceSrc + "/package.json")).patchedDependencies;
+        };
       };
 
       ohMyPi = pkgs.stdenv.mkDerivation {
-        inherit pname cargoDeps;
+        inherit pname bunDeps;
         version = sourceVersion;
         src = sourceSrc;
+
+        cargoDeps = rustPlatform.importCargoLock {
+          lockFile = sourceSrc + "/Cargo.lock";
+        };
 
         nativeBuildInputs = [
           pkgs.autoPatchelfHook
           pkgs.bun
+          pkgs.bun2nix.hook
           # `audiopus_sys` builds its vendored static libopus fallback with CMake.
           pkgs.cmake
-          pkgs.makeWrapper
           pkgs.installShellFiles
           pkgs.pkg-config
+          pkgs.removeReferencesTo
           toolchainWithTarget
           rustPlatform.cargoSetupHook
           # `maudio-sys` generates bindings with libclang; this hook also provides
@@ -289,26 +283,34 @@
           pkgs.pipewire
         ];
         strictDeps = true;
+        dontConfigure = true;
         # CMake belongs to `audiopus_sys`, not this derivation's source root.
         dontUseCmakeConfigure = true;
         dontStrip = true;
-        postPatch = ''
-          ${useBunExecutableTemplate}
-          ${useLooseNativeAddons}
-        '';
+        # Nix builders cannot hardlink cache files into node_modules.
+        bunInstallFlags = [
+          "--linker=isolated"
+          "--backend=copyfile"
+        ];
+        dontRunLifecycleScripts = true;
+
+        env = {
+          # Upstream reads this in `packages/coding-agent/scripts/build-binary.ts`
+          # and hands it to `Bun.build`'s `compile.executablePath`.
+          BUN_COMPILE_EXECUTABLE_PATH = "${bunRuntimeTemplate}/libexec/bun";
+        };
+
+        postPatch = useLooseNativeAddons;
 
         buildPhase = ''
           runHook preBuild
 
           export HOME="$TMPDIR/home"
           export XDG_CACHE_HOME="$TMPDIR/xdg-cache"
-          export BUN_INSTALL_CACHE_DIR="$TMPDIR/bun-install-cache"
           export CARGO_TARGET_DIR="$TMPDIR/cargo-target"
-          mkdir -p "$HOME" "$XDG_CACHE_HOME" "$BUN_INSTALL_CACHE_DIR" "$CARGO_TARGET_DIR"
+          mkdir -p "$HOME" "$XDG_CACHE_HOME" "$CARGO_TARGET_DIR"
           export LD_LIBRARY_PATH="${lib.makeLibraryPath [ pkgs.stdenv.cc.cc.lib ]}"
 
-          cp -a ${bunDeps}/node_modules ./node_modules
-          chmod -R u+w ./node_modules
           ${buildNativeAddons}
 
           bun --cwd=packages/coding-agent run build
@@ -321,20 +323,31 @@
 
           install -Dm755 packages/coding-agent/dist/omp "$out/lib/omp/omp"
           ${installNativeAddons}
-          makeWrapper "$out/lib/omp/omp" "$out/bin/omp" \
-            --set PI_SKIP_VERSION_CHECK 1 \
-            --prefix LD_LIBRARY_PATH : "${runtimeLibraryPath}"
+          install -d "$out/bin"
+          # A symlink, not a wrapper: process.execPath resolves through it to
+          # the real binary, so the loader still finds the loose addons beside
+          # it, and no LD_LIBRARY_PATH leaks into everything omp spawns.
+          ln -s ../lib/omp/omp "$out/bin/omp"
           install -Dm644 LICENSE "$out/share/licenses/${pname}/LICENSE"
 
           runHook postInstall
         '';
 
+        # Bun's bundler stamps the building interpreter's shebang
+        # (`#!${pkgs.bun}/bin/bun`) onto the embedded entry module, which the
+        # reference scanner turns into a runtime dependency on a Bun the
+        # standalone binary never executes. Strip it before fixup; the mangled
+        # shebang stays inert and `disallowedReferences` catches regressions.
         preFixup = ''
-          installShellCompletionsHook() {
+          remove-references-to -t ${pkgs.bun} "$out/lib/omp/omp"
+
+          ohMyPiPostFixup() {
+            ${addonAudioRunpath}
             ${installShellCompletions}
           }
-          postFixupHooks+=(installShellCompletionsHook)
+          postFixupHooks+=(ohMyPiPostFixup)
         '';
+        disallowedReferences = [ pkgs.bun ];
 
         doInstallCheck = true;
         installCheckPhase = ''
@@ -344,6 +357,13 @@
           smoke_output=$("$out/bin/omp" --smoke-test)
           if [ "$smoke_output" != "smoke-test: ok" ]; then
             echo "unexpected smoke test output: $smoke_output"
+            exit 1
+          fi
+
+          bun_runtime=$(BUN_BE_BUN=1 "$out/bin/omp" \
+            -e 'console.log(`''${Bun.version} ''${typeof Bun.Image}`)')
+          if [ "$bun_runtime" != "${requiredBunVersion} function" ]; then
+            echo "unexpected embedded Bun runtime: $bun_runtime"
             exit 1
           fi
 
@@ -361,10 +381,10 @@
         passthru = {
           inherit
             bunDeps
-            bunTemplate
-            cargoDeps
+            bunRuntimeTemplate
             toolchainWithTarget
             ;
+          bun = pkgs.bun;
         };
 
         meta = commonMeta;
@@ -405,9 +425,13 @@
           runHook preInstall
 
           install -Dm755 "$src" "$out/lib/omp/omp"
+          # Release binaries embed a compressed addon that is unpacked into
+          # ~/.omp/natives at first start, so its dlopen()s cannot be resolved
+          # with patchelf the way the source build does it. Upstream ships the
+          # addon without the pipewire link, so PulseAudio and ALSA are the only
+          # libraries the loader path has to provide.
           makeWrapper "$out/lib/omp/omp" "$out/bin/omp" \
-            --set PI_SKIP_VERSION_CHECK 1 \
-            --prefix LD_LIBRARY_PATH : "${runtimeLibraryPath}"
+            --prefix LD_LIBRARY_PATH : "${lib.makeLibraryPath dlopenedAudioLibraries}"
 
           runHook postInstall
         '';
@@ -439,7 +463,7 @@
       };
     in
     {
-      formatter.${system} = pkgs.nixfmt-rfc-style;
+      formatter.${system} = pkgs.nixfmt;
 
       packages.${system} = {
         default = ohMyPi;
