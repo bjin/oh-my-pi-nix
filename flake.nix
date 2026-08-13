@@ -34,12 +34,13 @@
 
   outputs =
     {
-      self,
       nixpkgs,
       bun2nix,
       nix-bun,
       rust-overlay,
       oh-my-pi,
+      # `self` is always passed; this flake has no use for it.
+      ...
     }:
     let
       system = "x86_64-linux";
@@ -347,7 +348,10 @@
           }
           postFixupHooks+=(ohMyPiPostFixup)
         '';
-        disallowedReferences = [ pkgs.bun ];
+        disallowedReferences = [
+          pkgs.bun
+          bunRuntimeTemplate
+        ];
 
         doInstallCheck = true;
         installCheckPhase = ''
