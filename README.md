@@ -1,4 +1,4 @@
-# oh-my-pi-nix
+# oh-my-pi.nix
 
 Nix flake for installing and building [oh-my-pi](https://github.com/can1357/oh-my-pi) from source, plus an independently versioned upstream binary package.
 
@@ -10,19 +10,19 @@ Fastest path, using the public Cachix cache:
 
 ```bash
 nix shell nixpkgs#cachix -c cachix use oh-my-pi
-nix profile add github:bjin/oh-my-pi-nix#oh-my-pi
+nix profile add github:bjin/oh-my-pi.nix#oh-my-pi
 ```
 
 Directly from GitHub, without configuring Cachix first:
 
 ```bash
-nix profile add github:bjin/oh-my-pi-nix#oh-my-pi
+nix profile add github:bjin/oh-my-pi.nix#oh-my-pi
 ```
 
 Install the upstream binary package instead:
 
 ```bash
-nix profile add github:bjin/oh-my-pi-nix#oh-my-pi-bin
+nix profile add github:bjin/oh-my-pi.nix#oh-my-pi-bin
 ```
 
 The same cache also carries `x86_64-linux` builds of upstream's own flake, for every release this repository has picked up, so a released tag installs from upstream directly without building:
@@ -37,7 +37,7 @@ After installation, `omp` will be available from your profile.
 ## Run without installing
 
 ```bash
-nix run github:bjin/oh-my-pi-nix#oh-my-pi -- --version
+nix run github:bjin/oh-my-pi.nix#oh-my-pi -- --version
 ```
 
 ## Build locally
