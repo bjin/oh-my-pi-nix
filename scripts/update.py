@@ -257,13 +257,57 @@ def write_pin(
     )
 
 
-def verify_flake_pin(version: str) -> None:
-    # Proves the flake reads the rewritten pin, and that it can name the
-    # derivation from this repository alone: evaluation never opens the release
-    # tarball, which is what keeps `nix profile add` a plain cache substitution.
-    evaluated = run("nix", "eval", "--raw", f".#packages.{SYSTEM}.oh-my-pi.version")
-    if evaluated != version:
-        raise SystemExit(f"flake evaluates version {evaluated}, expected {version}")
+def seed_source(tree: Path, version: str) -> None:
+    # `pkgs.fetchzip` would otherwise download the very tarball this run already
+    # has, so publish that tree instead: a fixed-output path is a pure function
+    # of its recursive sha256 and its name, so registering the tree under the
+    # name the flake gives it leaves that derivation already valid and `nix
+    # build` skips its own fetch. One download per update, not two.
+    #
+    # The comparison keeps the shortcut honest — it fails unless the flake, the
+    # freshly written pin and this tree all agree on the store path — and it is
+    # also what proves evaluation reads nothing but this repository. A short
+    # download cannot reach here either: gzip and tar both fail on a truncated
+    # archive. `ci.yml` still fetches the tarball independently on the pushed
+    # commit, where the store is cold.
+    #
+    # The attribute names matter: an attribute set carrying `outPath` serialises
+    # to that string alone, so asking for `outPath` by name would throw the rest
+    # of the query away.
+    source = json.loads(
+        run(
+            "nix",
+            "eval",
+            "--json",
+            "--apply",
+            "package: {"
+            " inherit (package) version;"
+            " sourceName = package.src.name;"
+            " sourcePath = package.src.outPath;"
+            " }",
+            f".#packages.{SYSTEM}.oh-my-pi",
+        )
+    )
+    if source["version"] != version:
+        raise SystemExit(
+            f"flake evaluates version {source['version']}, expected {version}"
+        )
+
+    added = run(
+        "nix",
+        "store",
+        "add",
+        "--mode",
+        "nar",
+        "--name",
+        source["sourceName"],
+        str(tree),
+    )
+    if added != source["sourcePath"]:
+        raise SystemExit(
+            f"seeded {added}, but the flake fetches {source['sourcePath']}"
+        )
+    print(f"Seeded {added}")
 
 
 def run_omp_isolated(*args: str, extra_env: dict[str, str] | None = None) -> str:
@@ -345,8 +389,14 @@ def commit_message(tag: str, version: str, previous_version: str, rev: str) -> s
     return f"Update oh-my-pi to {tag}"
 
 
-def stage_and_commit(message: str) -> None:
+def stage() -> None:
+    # Before evaluating: Nix reads a dirty work tree through git, so a patch file
+    # upstream only just added stays invisible — and fatal — until it is in the
+    # index.
     run("git", "add", "-A", "hashes.json", "upstream", capture=False)
+
+
+def commit(message: str) -> None:
     run("git", "commit", "-m", message, capture=False)
 
 
@@ -392,10 +442,11 @@ def main() -> int:
             read_rust_toolchain_channel(tree),
             vendor_upstream_files(tree, read_patched_dependencies(tree)),
         )
+        stage()
+        seed_source(tree, version)
 
-    verify_flake_pin(version)
     verify_build()
-    stage_and_commit(commit_message(tag, version, previous_version, rev))
+    commit(commit_message(tag, version, previous_version, rev))
     print(f"Committed update for {tag}. Review locally, then push when ready.")
     return 0
 
