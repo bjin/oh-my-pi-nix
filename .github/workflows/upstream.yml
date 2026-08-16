@@ -1,10 +1,10 @@
 name: Upstream flake
 
 on:
-  # `bin-hashes.json` is the only file in this repository that tracks upstream
-  # releases, so its content decides which upstream tag is worth building.
-  # GitHub's own path filter keeps the ordinary updater push (flake.nix and
-  # flake.lock only) from starting a runner at all. It is not sufficient on its
+  # `bin-hashes.json` is the file that tracks upstream's published release
+  # binary, so its content decides which upstream tag is worth building here.
+  # GitHub's own path filter keeps the source updater's push (`hashes.json` and
+  # `upstream/` only) from starting a runner at all. It is not sufficient on its
   # own: it always runs when a push carries more than 1000 commits or the diff
   # times out, and it diffs through the merge base rather than the pushed
   # range, so a force push onto a rewritten history can list the file even when
@@ -146,8 +146,8 @@ jobs:
         env:
           # Release tags are immutable once upstream publishes assets for them,
           # which is what puts the version into bin-hashes.json, so the tag ref
-          # is safe here (unlike the `oh-my-pi` flake input, which is pinned by
-          # commit because unreleased tags do get force-moved).
+          # is safe here (unlike the source pin in `hashes.json`, which records
+          # a commit because unreleased tags do get force-moved).
           FLAKE_REF: github:can1357/oh-my-pi/${{ needs.detect.outputs.tag }}
         run: |
           nix build "${FLAKE_REF}#packages.x86_64-linux.default" \

@@ -6,21 +6,34 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
-import sys
+import tarfile
 import tempfile
-from pathlib import Path
+import tomllib
+import urllib.request
+from pathlib import Path, PurePosixPath
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 ROOT = SCRIPT_DIR.parent
 TMP_ROOT = ROOT / ".tmp"
-FLAKE = ROOT / "flake.nix"
-LOCK_PATH = ROOT / "flake.lock"
+HASHES_PATH = ROOT / "hashes.json"
+UPSTREAM_DIR = ROOT / "upstream"
 SYSTEM = "x86_64-linux"
-INPUT_NAME = "oh-my-pi"
 UPSTREAM_REPO_URL = "https://github.com/can1357/oh-my-pi.git"
+UPSTREAM_ARCHIVE_URL = "https://github.com/can1357/oh-my-pi/archive/{rev}.tar.gz"
 UPSTREAM_TAG_GLOB = "v*.*.*"
-FLAKE_URL_PATTERN = r'^(\s*url = "github:can1357/oh-my-pi/)([0-9a-f]{40})(";)$'
+
+# Files the flake parses while evaluating, copied verbatim out of the release
+# tarball into a flat `upstream/`. Nothing is ever edited in place; an update
+# replaces the whole directory. Keeping `nix/bun.nix` as `upstream/bun.nix`
+# leaves it one directory below the tree root, exactly where it sits upstream,
+# which is what lets flake.nix resolve the workspace member paths that file
+# spells relative to itself.
+COPIED_FILES = {
+    "nix/bun.nix": "bun.nix",
+    "Cargo.lock": "Cargo.lock",
+}
 
 
 def run(
@@ -109,35 +122,148 @@ def resolve_target_tag(raw_version: str | None) -> tuple[str, str, str]:
     return tag, tag.removeprefix("v"), rev
 
 
-def read_flake_rev() -> str:
-    match = re.search(FLAKE_URL_PATTERN, FLAKE.read_text(), re.MULTILINE)
+def read_pin() -> tuple[str, str]:
+    pin = json.loads(HASHES_PATH.read_text())
+    if not isinstance(pin, dict):
+        raise SystemExit("hashes.json is not a JSON object")
+    version = pin.get("version")
+    rev = pin.get("rev")
+    if not isinstance(version, str) or not version:
+        raise SystemExit("hashes.json is missing version")
+    if not isinstance(rev, str) or not re.fullmatch(r"[0-9a-f]{40}", rev):
+        raise SystemExit("hashes.json is missing a 40-character rev")
+    return version, rev
+
+
+def download_source(rev: str, work: Path) -> Path:
+    # The same archive `pkgs.fetchzip` downloads at build time, so the hash
+    # taken below is the one the flake has to record.
+    url = UPSTREAM_ARCHIVE_URL.format(rev=rev)
+    print(f"Downloading {url}")
+    archive = work / "source.tar.gz"
+    with urllib.request.urlopen(url) as response, archive.open("wb") as sink:
+        shutil.copyfileobj(response, sink)
+
+    unpacked = work / "unpacked"
+    unpacked.mkdir()
+    with tarfile.open(archive, "r:gz") as tar:
+        tar.extractall(unpacked, filter="data")
+
+    roots = sorted(unpacked.iterdir())
+    if len(roots) != 1 or not roots[0].is_dir():
+        raise SystemExit(
+            f"unexpected release tarball layout: {[root.name for root in roots]}"
+        )
+    return roots[0]
+
+
+def hash_source(tree: Path) -> str:
+    # `fetchzip` strips the tarball's single root directory and hashes what is
+    # left, which is what this tree already is.
+    digest = run("nix", "hash", "path", str(tree))
+    if not digest.startswith("sha256-"):
+        raise SystemExit(f"unexpected hash for {tree}: {digest}")
+    return digest
+
+
+def read_json(path: Path) -> dict:
+    data = json.loads(path.read_text())
+    if not isinstance(data, dict):
+        raise SystemExit(f"{path} is not a JSON object")
+    return data
+
+
+def read_bun_version(tree: Path) -> str:
+    # The build pins Bun to this exact release rather than treating the floor as
+    # a range; flake.nix explains why.
+    spec = read_json(tree / "packages/utils/package.json").get("engines", {}).get("bun")
+    if not isinstance(spec, str):
+        raise SystemExit("upstream release does not declare engines.bun")
+    match = re.fullmatch(r">=(\d+\.\d+\.\d+)", spec.strip())
     if match is None:
-        raise SystemExit("could not parse the oh-my-pi input commit from flake.nix")
-    return match.group(2)
+        raise SystemExit(f"unrecognised engines.bun specifier: {spec}")
+    return match.group(1)
 
 
-def write_flake_rev(rev: str) -> None:
-    content, count = re.subn(
-        FLAKE_URL_PATTERN,
-        lambda match: f"{match.group(1)}{rev}{match.group(3)}",
-        FLAKE.read_text(),
-        count=1,
-        flags=re.MULTILINE,
+def read_rust_toolchain_channel(tree: Path) -> str:
+    toolchain = tomllib.loads((tree / "rust-toolchain.toml").read_text())
+    channel = toolchain.get("toolchain", {}).get("channel")
+    if not isinstance(channel, str) or not channel:
+        raise SystemExit("upstream release does not declare a rust toolchain channel")
+    return channel
+
+
+def read_source_version(tree: Path) -> str:
+    version = read_json(tree / "packages/coding-agent/package.json").get("version")
+    if not isinstance(version, str) or not version:
+        raise SystemExit("upstream release does not declare a package version")
+    return version
+
+
+def read_patched_dependencies(tree: Path) -> dict[str, str]:
+    patched = read_json(tree / "package.json").get("patchedDependencies", {})
+    if not isinstance(patched, dict) or not all(
+        isinstance(patch, str) for patch in patched.values()
+    ):
+        raise SystemExit("upstream patchedDependencies is not a string map")
+    return patched
+
+
+def vendor_upstream_files(tree: Path, patched: dict[str, str]) -> dict[str, str]:
+    copies = dict(COPIED_FILES)
+    flat_names = {flat: source for source, flat in copies.items()}
+    patched_flat: dict[str, str] = {}
+
+    for dependency, patch in sorted(patched.items()):
+        flat = PurePosixPath(patch).name
+        claimed = flat_names.setdefault(flat, patch)
+        if claimed != patch:
+            raise SystemExit(f"upstream/{flat} would hold both {claimed} and {patch}")
+        copies[patch] = flat
+        patched_flat[dependency] = flat
+
+    if UPSTREAM_DIR.exists():
+        shutil.rmtree(UPSTREAM_DIR)
+    UPSTREAM_DIR.mkdir()
+    for source, flat in sorted(copies.items()):
+        origin = tree / source
+        if not origin.is_file():
+            raise SystemExit(f"upstream release is missing {source}")
+        shutil.copyfile(origin, UPSTREAM_DIR / flat)
+    return patched_flat
+
+
+def write_pin(
+    version: str,
+    rev: str,
+    source_hash: str,
+    bun_version: str,
+    rust_toolchain_channel: str,
+    patched_dependencies: dict[str, str],
+) -> None:
+    HASHES_PATH.write_text(
+        json.dumps(
+            {
+                "version": version,
+                "rev": rev,
+                "hash": source_hash,
+                "bunVersion": bun_version,
+                "rustToolchainChannel": rust_toolchain_channel,
+                "patchedDependencies": patched_dependencies,
+            },
+            indent=2,
+        )
+        + "\n"
     )
-    if count != 1:
-        raise SystemExit("could not rewrite the oh-my-pi input commit in flake.nix")
-    FLAKE.write_text(content)
 
 
-def read_locked_rev() -> str:
-    lock = json.loads(LOCK_PATH.read_text())
-    return lock["nodes"][INPUT_NAME]["locked"]["rev"]
-
-
-def read_package_version() -> str:
-    # The derivation takes its version from the pinned source tree, so this also
-    # proves the tag points at the release it claims to be.
-    return run("nix", "eval", "--raw", f".#packages.{SYSTEM}.oh-my-pi.version")
+def verify_flake_pin(version: str) -> None:
+    # Proves the flake reads the rewritten pin, and that it can name the
+    # derivation from this repository alone: evaluation never opens the release
+    # tarball, which is what keeps `nix profile add` a plain cache substitution.
+    evaluated = run("nix", "eval", "--raw", f".#packages.{SYSTEM}.oh-my-pi.version")
+    if evaluated != version:
+        raise SystemExit(f"flake evaluates version {evaluated}, expected {version}")
 
 
 def run_omp_isolated(*args: str, extra_env: dict[str, str] | None = None) -> str:
@@ -208,7 +334,6 @@ def verify_no_embedded_native_addons() -> None:
 
 
 def verify_build() -> None:
-    run("nix", "fmt", "flake.nix", capture=False)
     run("nix", "build", ".", capture=False)
     verify_smoke_test()
     verify_no_embedded_native_addons()
@@ -221,7 +346,7 @@ def commit_message(tag: str, version: str, previous_version: str, rev: str) -> s
 
 
 def stage_and_commit(message: str) -> None:
-    run("git", "add", "flake.nix", "flake.lock", capture=False)
+    run("git", "add", "-A", "hashes.json", "upstream", capture=False)
     run("git", "commit", "-m", message, capture=False)
 
 
@@ -237,13 +362,7 @@ def main() -> int:
 
     require_clean_git_tree()
 
-    previous_rev = read_locked_rev()
-    if read_flake_rev() != previous_rev:
-        raise SystemExit(
-            "flake.nix and flake.lock disagree on the pinned oh-my-pi commit; "
-            "run `nix flake update oh-my-pi` and commit the result first"
-        )
-    previous_version = read_package_version()
+    previous_version, previous_rev = read_pin()
     tag, version, rev = resolve_target_tag(args.version)
 
     if rev == previous_rev:
@@ -255,21 +374,26 @@ def main() -> int:
     else:
         print(f"Updating from {previous_version} to {version} ({rev})")
 
-    write_flake_rev(rev)
-    run("nix", "flake", "update", INPUT_NAME, capture=False)
-
-    locked_rev = read_locked_rev()
-    if locked_rev != rev:
-        raise SystemExit(
-            f"locked oh-my-pi commit is {locked_rev}, expected {rev}"
+    TMP_ROOT.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix="oh-my-pi-source-", dir=TMP_ROOT
+    ) as work_dir:
+        tree = download_source(rev, Path(work_dir))
+        source_version = read_source_version(tree)
+        if source_version != version:
+            raise SystemExit(
+                f"upstream tag {tag} ships version {source_version}, not {version}"
+            )
+        write_pin(
+            version,
+            rev,
+            hash_source(tree),
+            read_bun_version(tree),
+            read_rust_toolchain_channel(tree),
+            vendor_upstream_files(tree, read_patched_dependencies(tree)),
         )
 
-    package_version = read_package_version()
-    if package_version != version:
-        raise SystemExit(
-            f"upstream tag {tag} builds version {package_version}, not {version}"
-        )
-
+    verify_flake_pin(version)
     verify_build()
     stage_and_commit(commit_message(tag, version, previous_version, rev))
     print(f"Committed update for {tag}. Review locally, then push when ready.")

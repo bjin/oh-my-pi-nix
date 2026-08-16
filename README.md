@@ -6,7 +6,7 @@ Why use this flake?
 
 - **Hands-off updates:** an hourly updater follows new releases, so `nix profile upgrade` picks them up.
 - **Linux integrations:** shell completions and Wayland/PipeWire screencasting are enabled by default.
-- **Fast installs:** builds are available from the public Cachix cache.
+- **Fast installs:** builds are available from the public Cachix cache, and evaluation reads only this repository, so a cached install fetches the package instead of upstream's source tarball.
 - **Official binary release:** `oh-my-pi-bin` packages the upstream release binary alongside the source build.
 - **Upstream choice:** the same cache also builds and carries upstream's official flake for every release this repository has picked up.
 

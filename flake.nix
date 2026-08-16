@@ -15,21 +15,6 @@
       url = "github:oxalica/rust-overlay";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    # Source tree only (`flake = false`). This repository keeps its own
-    # derivation — loose native addons for both CPU variants, shell
-    # completions, and the independently versioned binary package — but reuses
-    # upstream's checked-in `nix/bun.nix`, `Cargo.lock` and
-    # `rust-toolchain.toml`, so no dependency hashes are maintained here.
-    #
-    # Pinned by commit, not by tag: upstream force-moves release tags onto new
-    # commits, and a tag ref is resolved through Nix's cached GitHub ref lookup,
-    # which keeps serving the superseded commit for `tarball-ttl` — one hour,
-    # which is also the updater's interval. `scripts/update.py` resolves the tag
-    # with `git ls-remote` and writes the commit it saw.
-    oh-my-pi = {
-      url = "github:can1357/oh-my-pi/37eee71978951fccf66b21f7e3e2b74596ac9d74";
-      flake = false;
-    };
   };
 
   outputs =
@@ -38,7 +23,6 @@
       bun2nix,
       nix-bun,
       rust-overlay,
-      oh-my-pi,
       # `self` is always passed; this flake has no use for it.
       ...
     }:
@@ -49,21 +33,26 @@
       pname = "oh-my-pi";
       binData = builtins.fromJSON (builtins.readFile ./bin-hashes.json);
 
-      sourceSrc = oh-my-pi;
-      sourceVersion = (lib.importJSON (sourceSrc + "/packages/coding-agent/package.json")).version;
+      # Everything evaluation needs to know about the upstream release lives in
+      # this repository: `hashes.json` holds the scalars and the release
+      # tarball's hash, `upstream/` holds verbatim copies of the files the
+      # derivation parses. Reading any of it out of the tarball instead — the
+      # way a `flake = false` source input invites — would make every
+      # evaluation, `nix profile add` included, download 44 MiB from GitHub
+      # before Nix could even name the derivation, let alone substitute it from
+      # the binary cache.
+      #
+      # Pinned by commit, not by tag: upstream force-moves release tags onto new
+      # commits. `scripts/update.py` resolves the tag with `git ls-remote`,
+      # records the commit it saw, and rewrites the pin and `upstream/` with it.
+      srcData = builtins.fromJSON (builtins.readFile ./hashes.json);
+      sourceVersion = srcData.version;
 
       # `cli.ts` enforces `engines.bun` at startup and every `Bun.Image` caller
       # relies on it unguarded, so the entire build runs on exactly that Bun
       # release; nixpkgs' bun trails it (1.3.13 against a >=1.3.14 floor).
-      requiredBunVersion =
-        let
-          spec = (lib.importJSON (sourceSrc + "/packages/utils/package.json")).engines.bun;
-          parsed = builtins.match ">=([0-9]+\\.[0-9]+\\.[0-9]+)" spec;
-        in
-        if parsed == null then
-          throw "unrecognised engines.bun specifier: ${spec}"
-        else
-          builtins.head parsed;
+      # `scripts/update.py` resolves that floor to the version it records here.
+      requiredBunVersion = srcData.bunVersion;
       bunSourcesFile = nix-bun + "/versions/${requiredBunVersion}.json";
 
       pkgs = import nixpkgs {
@@ -79,6 +68,15 @@
                 throw "nix-bun packages no Bun ${requiredBunVersion}; update the nix-bun input";
           })
         ];
+      };
+
+      # A fixed-output fetch rather than a flake input: the store path follows
+      # from `hashes.json` alone, so nothing is downloaded until something
+      # actually builds from source.
+      sourceSrc = pkgs.fetchzip {
+        name = "${pname}-${sourceVersion}-source";
+        url = "https://github.com/can1357/oh-my-pi/archive/${srcData.rev}.tar.gz";
+        hash = srcData.hash;
       };
 
       # `--smoke-test` starts a daemon broker whose runtime directory is a
@@ -199,7 +197,7 @@
         '') nativeAddonVariants
       );
 
-      rustToolchainChannel = (lib.importTOML (sourceSrc + "/rust-toolchain.toml")).toolchain.channel;
+      rustToolchainChannel = srcData.rustToolchainChannel;
       toolchainWithTarget =
         let
           nightlyDateMatch = builtins.match "nightly-(.+)" rustToolchainChannel;
@@ -252,12 +250,48 @@
         '';
       };
 
+      # `fetchBunDeps` hands the file to `pkgs.callPackage`, whose autofill
+      # supplies `copyPathToStore` — an eval-time `builtins.path`. Upstream
+      # applies it to every workspace member through a path relative to
+      # `bun.nix` itself (`copyPathToStore ../packages/agent`), and the verbatim
+      # copy keeps that spelling, so those literals land beside `upstream/`,
+      # where nothing exists. Redirect them into the fetched tree, and copy in a
+      # derivation: an eval-time copy would realise `sourceSrc`, downloading the
+      # tarball during evaluation.
+      #
+      # The root comes from `bunNixFile` itself, through `toString`. Anything
+      # else drifts: interpolating a directory (`"${./.}"`) copies the whole
+      # working tree into the store a second time, under a path that no longer
+      # prefixes the literals it is meant to strip.
+      bunNixFile = ./upstream/bun.nix;
+      bunNixRoot = dirOf (dirOf (toString bunNixFile));
+      bunWorkspaceMember =
+        path:
+        let
+          relative = lib.removePrefix "${bunNixRoot}/" (toString path);
+        in
+        if lib.hasPrefix "/" relative then
+          throw "upstream/bun.nix reads ${toString path}, which is outside ${bunNixRoot}"
+        else
+          pkgs.runCommandLocal "bun-workspace-${baseNameOf relative}" { } ''
+            cp -r "${sourceSrc}/${relative}" "$out"
+          '';
+      bunNix =
+        args:
+        import bunNixFile (
+          {
+            inherit (pkgs) fetchFromGitHub fetchgit fetchurl;
+            copyPathToStore = bunWorkspaceMember;
+          }
+          // args
+        );
+
       bunDeps = pkgs.bun2nix.fetchBunDeps {
-        bunNix = sourceSrc + "/nix/bun.nix";
+        inherit bunNix;
         overrides = pkgs.bun2nix.patchedDependenciesToOverrides {
-          patchedDependencies =
-            lib.mapAttrs (_: patch: sourceSrc + "/${patch}")
-              (lib.importJSON (sourceSrc + "/package.json")).patchedDependencies;
+          # Applying a patch copies it into the store during evaluation, so
+          # these have to be repository files as well.
+          patchedDependencies = lib.mapAttrs (_: patch: ./upstream + "/${patch}") srcData.patchedDependencies;
         };
       };
 
@@ -267,7 +301,7 @@
         src = sourceSrc;
 
         cargoDeps = rustPlatform.importCargoLock {
-          lockFile = sourceSrc + "/Cargo.lock";
+          lockFile = ./upstream/Cargo.lock;
         };
 
         nativeBuildInputs = [
