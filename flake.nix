@@ -27,7 +27,7 @@
     # which is also the updater's interval. `scripts/update.py` resolves the tag
     # with `git ls-remote` and writes the commit it saw.
     oh-my-pi = {
-      url = "github:can1357/oh-my-pi/ffd53ff92a6f575d499730475a73460dd7cc2eea";
+      url = "github:can1357/oh-my-pi/37eee71978951fccf66b21f7e3e2b74596ac9d74";
       flake = false;
     };
   };
@@ -81,10 +81,23 @@
         ];
       };
 
+      # `--smoke-test` starts a daemon broker whose runtime directory is a
+      # `mkdtemp` straight under `os.tmpdir()` (upstream
+      # `launch/client.ts:smokeTestDaemonBroker`), and every broker sweeps that
+      # directory's *siblings*: 17.3.5's `pruneDeadDaemonRuntimeDirs` deletes
+      # each neighbouring directory that has no live broker and has not been
+      # touched for five minutes. Rooted at the builder's `TMPDIR` that sweep
+      # reaches `$NIX_BUILD_TOP/source` — this phase's own working directory —
+      # once the build outlives the grace period, and the next worker thread
+      # then dies in `getcwd` with `CurrentWorkingDirectoryUnlinked`. Give omp a
+      # private, freshly created tmpdir so the sweep only ever sees scratch
+      # directories the check itself just made.
       installCheckEnvironment = ''
         export HOME="$TMPDIR/check-home"
         export XDG_DATA_HOME="$TMPDIR/check-xdg-data"
-        mkdir -p "$HOME" "$XDG_DATA_HOME/omp"
+        export TMPDIR="$TMPDIR/check-tmp"
+        export TMP="$TMPDIR" TEMP="$TMPDIR" TEMPDIR="$TMPDIR"
+        mkdir -p "$HOME" "$XDG_DATA_HOME/omp" "$TMPDIR"
       '';
       installShellCompletions = ''
         completion_dir="$TMPDIR/completions"
